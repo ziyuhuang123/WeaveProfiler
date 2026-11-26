@@ -16,6 +16,13 @@ from typing import Any, List, Optional, Sequence
 
 ROOT = Path(__file__).resolve().parents[1]
 RUN = ROOT / "run.py"
+EXPECTED_NVIDIA_CAPTURE_STDERR = (
+    "run.py capture is not available on NVIDIA cards (h20/b300/sm86) any more.\n"
+    "Use the main audit, which runs nsys with GPU metrics itself:\n"
+    '  MCP tool weaveprof_megakernel_audit with "capture_nsys": true, or\n'
+    "  python3 -B weaveprof/aka_adapter.py megakernel-audit < request.json\n"
+    "To capture an arbitrary program with nsys only, run nsys directly (see SKILL.md).\n"
+)
 
 
 class RunCliTest(unittest.TestCase):
@@ -70,23 +77,7 @@ class RunCliTest(unittest.TestCase):
         self.assert_success(completed)
         self.assertTrue(completed.stdout.lstrip().startswith("usage: gemm_probe.py"))
 
-    def test_capture_routes_nvidia_and_amd_help_without_starting_gpu_work(self) -> None:
-        h20 = self.run_cli(
-            (
-                "capture",
-                "--card",
-                "h20",
-                "--arch",
-                "sm_90",
-                "--project",
-                str(self.project),
-                "--",
-                "--help",
-            )
-        )
-        self.assert_success(h20)
-        self.assertTrue(h20.stdout.lstrip().startswith("usage: capture_nsys.py"))
-
+    def test_capture_routes_amd_help_without_starting_gpu_work(self) -> None:
         mi308x = self.run_cli(
             (
                 "capture",
@@ -103,34 +94,22 @@ class RunCliTest(unittest.TestCase):
         self.assert_success(mi308x)
         self.assertTrue(mi308x.stdout.lstrip().startswith("usage: capture_rocm.py"))
 
-    def test_b300_capture_requires_and_accepts_both_exact_architectures(self) -> None:
-        missing = self.run_cli(
-            ("capture", "--card", "b300", "--project", str(self.project), "--", "--help")
+    def test_capture_rejects_nvidia_cards_and_guides_to_megakernel_audit(self) -> None:
+        cases = (
+            ("h20_bare", ("capture", "--card", "h20")),
+            ("h20_full", ("capture", "--card", "h20", "--arch", "sm_90", "--project", str(self.project), "--collector", "nsys", "--", "--help")),
+            ("b300_bare", ("capture", "--card", "b300")),
+            ("b300_sm100a", ("capture", "--card", "b300", "--arch", "sm_100a", "--project", str(self.project), "--", "--help")),
+            ("b300_sm103a", ("capture", "--card", "b300", "--arch", "sm_103a", "--project", str(self.project), "--", "--help")),
+            ("sm86_bare", ("capture", "--card", "sm86")),
+            ("sm86_full", ("capture", "--card", "sm86", "--arch", "sm_86", "--project", str(self.project), "--", "--help")),
         )
-        self.assertEqual(2, missing.returncode, self.command_diagnostic(missing))
-        self.assertIn(
-            "B300 requires --arch sm_100a or sm_103a", missing.stderr
-        )
-
-        for arch in ("sm_100a", "sm_103a"):
-            with self.subTest(arch=arch):
-                completed = self.run_cli(
-                    (
-                        "capture",
-                        "--card",
-                        "b300",
-                        "--arch",
-                        arch,
-                        "--project",
-                        str(self.project),
-                        "--",
-                        "--help",
-                    )
-                )
-                self.assert_success(completed)
-                self.assertTrue(
-                    completed.stdout.lstrip().startswith("usage: capture_nsys.py")
-                )
+        for label, argv in cases:
+            with self.subTest(case=label):
+                completed = self.run_cli(argv)
+                self.assertEqual(2, completed.returncode, self.command_diagnostic(completed))
+                self.assertEqual("", completed.stdout, self.command_diagnostic(completed))
+                self.assertEqual(EXPECTED_NVIDIA_CAPTURE_STDERR, completed.stderr, self.command_diagnostic(completed))
 
 
 if __name__ == "__main__":

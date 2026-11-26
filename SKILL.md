@@ -101,9 +101,10 @@ Language knowledge: [CUDA C++](configs/languages/cuda_cpp/patterns.json), [HIP C
 All commands enter through [run.py](run.py). Use absolute project, run, and evidence paths.
 
 ```bash
-python3 -B run.py capture --card h20|b300|mi308x|sm86 [--arch A] --project P --out RUN [--collector auto|nsys|rocprof-sys|rocprofv3] [--deadline ISO8601_UTC] [--heartbeat PATH] --payload CMD [ARG...]
+python3 -B run.py capture --card mi308x [--arch gfx942] --project P --out RUN [--collector auto|rocprof-sys|rocprofv3] [--deadline ISO8601_UTC] [--heartbeat PATH] --payload CMD [ARG...]
 python3 -B run.py gemm-probe --card h20 --arch sm_90 --profile full|quick [--shape MxNxK] --gpu auto --out RUN --deadline-sec 1800 [--trace-processor PATH]
 ```
+`run.py capture` is AMD MI308X only; on NVIDIA (`h20`/`b300`/`sm86`), use MCP tool `weaveprof_megakernel_audit` with `"capture_nsys": true` (`python3 -B weaveprof/aka_adapter.py megakernel-audit < tmp/request.json`) or run `nsys profile` directly (lines 39, 49).
 
 B300 commands must pass the exact `--arch`; H20 and MI308X may omit it when `--card` resolves one architecture. Repeat `--source`/`--glob` to select multiple inputs. All staged and agent commands route through `run.py` (18 registered subcommands).
 

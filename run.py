@@ -141,7 +141,7 @@ def _run_observed(cmd: Sequence[str], *, cwd: Path, deadline: Optional[float],
 
 def _capture(argv: Sequence[str]) -> int:
     parser = argparse.ArgumentParser(
-        description="Route one capture to nsys or rocprof-sys/rocprofv3",
+        description="Route one capture to rocprof-sys/rocprofv3",
         epilog="Arguments after --payload are passed verbatim to the selected capture tool.")
     parser.add_argument("--card", required=True, choices=CARDS)
     parser.add_argument("--arch")
@@ -153,19 +153,25 @@ def _capture(argv: Sequence[str]) -> int:
     parser.add_argument("--heartbeat", help="heartbeat JSON path")
     parser.add_argument("rest", nargs=argparse.REMAINDER)
     args = parser.parse_args(list(argv))
-    if args.card == "b300" and not args.arch:
-        parser.error("B300 requires --arch sm_100a or sm_103a")
     try:
-        from weaveprof.pipeline.core.registry import resolve_target, UnsupportedTarget
+        from weaveprof.pipeline.core.registry import CARD_SPECS, UnsupportedTarget, resolve_target
     except Exception as exc:
         _json_print({"ok": False, "error": "cannot import registry: {}".format(exc)})
         return 2
+    if CARD_SPECS[args.card]["platform"] == "nv":
+        sys.stderr.write(
+            "run.py capture is not available on NVIDIA cards (h20/b300/sm86) any more.\n"
+            "Use the main audit, which runs nsys with GPU metrics itself:\n"
+            '  MCP tool weaveprof_megakernel_audit with "capture_nsys": true, or\n'
+            "  python3 -B weaveprof/aka_adapter.py megakernel-audit < request.json\n"
+            "To capture an arbitrary program with nsys only, run nsys directly (see SKILL.md).\n"
+        )
+        return 2
     try:
-        route = resolve_target(card=args.card, arch=args.arch, platform=args.platform)
+        resolve_target(card=args.card, arch=args.arch, platform=args.platform)
     except UnsupportedTarget as exc:
         _json_print(exc.as_dict())
         return 2
-    platform = str(route.get("platform"))
     root = Path(args.root).expanduser().resolve() if args.root else None
     if root is None:
         parser.error("--project/--root is required")
@@ -182,24 +188,15 @@ def _capture(argv: Sequence[str]) -> int:
     if rest and rest[0] == "--":
         rest = rest[1:]
 
-    if platform == "nv":
-        if args.collector not in (None, "auto", "nsys"):
-            parser.error("H20/B300 use nsys; collector={!r} is invalid".format(args.collector))
-        script = ROOT / "weaveprof/pipeline/capture" / "capture_nsys.py"
-        tool_argv: List[str] = ["--root", str(root)]
-        if out_dir is not None:
-            tool_argv.extend(["--out-dir", str(out_dir)])
-        tool_argv.extend(rest)
-    else:
-        if args.collector == "nsys":
-            parser.error("MI308X uses rocprof-sys with rocprofv3 fallback; nsys is invalid")
-        script = ROOT / "weaveprof/pipeline/capture" / "capture_rocm.py"
-        tool_argv = ["--root", str(root)]
-        if out_dir is not None:
-            tool_argv.extend(["--out-dir", str(out_dir)])
-        if args.collector and args.collector != "auto":
-            tool_argv.extend(["--collector", args.collector])
-        tool_argv.extend(rest)
+    if args.collector == "nsys":
+        parser.error("MI308X uses rocprof-sys with rocprofv3 fallback; nsys is invalid")
+    script = ROOT / "weaveprof/pipeline/capture" / "capture_rocm.py"
+    tool_argv: List[str] = ["--root", str(root)]
+    if out_dir is not None:
+        tool_argv.extend(["--out-dir", str(out_dir)])
+    if args.collector and args.collector != "auto":
+        tool_argv.extend(["--collector", args.collector])
+    tool_argv.extend(rest)
     heartbeat = Path(args.heartbeat).expanduser().resolve() if args.heartbeat else None
     return _run_observed([sys.executable, "-B", str(script), *tool_argv], cwd=root,
                          deadline=deadline, heartbeat=heartbeat, card=args.card,

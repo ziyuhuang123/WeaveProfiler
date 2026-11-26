@@ -260,7 +260,7 @@ def _check_run_interface(fails: list[str]) -> None:
     for command in REQUIRED_COMMANDS:
         if '"{}"'.format(command) not in text:
             fails.append("run.py dispatch missing command: {}".format(command))
-    for token in ('capture_nsys.py', 'capture_rocm.py', 'gemm_probe.py', 'rocprof-sys', 'rocprofv3',
+    for token in ('capture_rocm.py', 'gemm_probe.py', 'rocprof-sys', 'rocprofv3',
                   'heartbeat', '--deadline', 'delivery_evidence'):
         if token not in text and token != 'delivery_evidence':
             fails.append("run.py/capture integration missing {}".format(token))
