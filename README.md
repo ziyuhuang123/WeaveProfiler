@@ -4,18 +4,18 @@
 
 > **让智能体与工程师看清 GPU 核内每一微秒——面向现代异步流水算子与智能体递归自我改进（RSI）的自动化核内剖析框架。**
 
-**WeaveProfiler** 将**闭环自动核内软件插桩**与**同次硬件利用率采样**刚性对齐到同一张静态四联时间线图（`overview.png`）中。框架支持以 **`Skill + MCP + Hook`** 直接嵌入 Claude Code、Qwen Code、OpenAI Codex CLI、Antigravity 等 AI 编程代理，也可通过 CLI 或 Python SDK 独立调用。跨 **CUDA C++、HIP C++、Triton（NVIDIA PTX 与 AMD AMDGCN）及 CuTeDSL**，所有探针注入与校验均在隔离副本内自动完成，零生产源码修改、零函数签名入侵。
+**WeaveProfiler** 将**自动核内软件插桩**与**同次硬件利用率采样**对齐到时间线图（`overview.png`）中。框架支持以 **`Skill + MCP + Hook`** 直接嵌入 Claude Code、Qwen Code、OpenAI Codex CLI、Antigravity 等 AI 编程代理，也可通过 CLI 独立调用。支持 **CUDA C++、HIP C++、Triton 及 CuTeDSL**，插桩语义的识别由大模型完成，插桩动作与输出后处理由固定代码完成，尽可能确保可靠性和稳定性。
 
 ---
 
 ## 1. 为什么需要 WeaveProfiler
 
-现代大模型算子（如 MegaMoE、FlashAttention-3、FlashMLA、GDN）普遍采用**持久化融合核（Megakernel）**：同一个 CTA 里的不同 Warp 分工负责搬运、矩阵计算与跨卡通信，靠多级**异步硬件流水线**（NVIDIA `cp.async` / TMA / `wgmma` / `tcgen05`、AMD `buffer_load` / `vmcnt` / `MFMA`）掩盖延迟。性能好坏主要看两件事：**在途深度 `d`**（同时有几笔异步操作在飞，决定延迟藏没藏住）和**暴露等待 `Exposed Wait`**（真正卡在等待指令上的时间，直接指出瓶颈在哪）。
+现代大模型算子（如 MegaMoE、FlashAttention-3、FlashMLA、GDN）普遍采用**持久化融合核（Megakernel）**：同一个 CTA 里的不同 Warp 分工负责搬运、矩阵计算与跨卡通信，靠多级**异步硬件流水线**（NVIDIA `cp.async` / TMA / `wgmma` / `tcgen05`、AMD `buffer_load` / `vmcnt` / `MFMA`）掩盖延迟。
 
 现有剖析工具或直接让大模型手改源码插桩，主要卡在三个问题上：
 
-1. **手改源码插桩容易出错且缺校验**：`nsys`、`rocprofv3` 只能看整核黑盒，分不清核内哪个 Warp 在干什么；让大模型直接改核函数打点，经常出现分支漏配、漏采部分 Warp、缓冲写满截断，或在热循环里打点过密拖慢算子。
-2. **异步指令被当成同步指令测错**：源码级探针在异步指令刚发出时就记了结束，看不到底层真正的提交与等待边界（如 Triton 自动生成的 `commit_group` / `wait_group` 或 AMD `s_waitcnt vmcnt(N)`），导致测出来的搬运耗时比真实情况短几十倍、在途深度虚报成 `d = 0`，真正的等待停顿反而算进了后面的矩阵计算里。
+1. **手改源码插桩容易出错且缺校验**：`nsys`、`rocprofv3` 只能看整核黑盒，分不清核内哪个 Warp 在干什么；让大模型直接改核函数打点，经常出现漏采部分 Warp、缓冲写满截断，或在热循环里打点过密拖慢算子。
+2. **异步指令被当成同步指令测错**：源码级探针在异步指令刚发出时就记了结束，看不到底层真正的提交与等待边界（如 Triton 自动生成的 `commit_group` / `wait_group` 或 AMD `s_waitcnt vmcnt(N)`），导致测出来的搬运耗时比真实情况短几十倍。
 3. **打点状态太重，挤爆寄存器或共享内存**：生产级融合核的寄存器和共享内存往往卡在硬件上限边缘；多占几个寄存器就会触发本地内存 `STL/LDL` 溢出，多占几 KB 共享内存就会把并发度从 `2 CTA/SM` 挤掉到 `1 CTA/SM`。
 
 ---

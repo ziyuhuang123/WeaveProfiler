@@ -4,18 +4,18 @@
 
 > **See what every SM/CU and warp/wave is doing microsecond by microsecond — an automated intra-kernel GPU profiling framework built for modern asynchronous pipelines and agent-driven Recursive Self-Improvement (RSI).**
 
-**WeaveProfiler** aligns **closed-loop automated intra-kernel software instrumentation** with **same-run hardware utilization counters** in a single static four-panel timeline image (`overview.png`). It integrates directly inside AI coding agents (`Claude Code`, `Qwen Code`, `OpenAI Codex CLI`, `Antigravity`) via **`Skill + MCP + Hook`**, and also provides a standalone CLI and Python SDK. Across **CUDA C++, HIP C++, Triton (NVIDIA PTX & AMD AMDGCN), and CuTeDSL**, all probe injection and verification run in isolated scratch copies with zero edits to production code or function signatures.
+**WeaveProfiler** aligns **automated intra-kernel software instrumentation** with **same-run hardware utilization counters** in a timeline image (`overview.png`). It integrates directly inside AI coding agents (`Claude Code`, `Qwen Code`, `OpenAI Codex CLI`, `Antigravity`) via **`Skill + MCP + Hook`**, and also provides a standalone CLI. Across **CUDA C++, HIP C++, Triton, and CuTeDSL**, semantic stage identification is handled by an LLM, while probe injection and output post-processing are executed by deterministic code to maximize reliability and stability.
 
 ---
 
 ## 1. Why WeaveProfiler
 
-Modern LLM kernels (MegaMoE, FlashAttention-3, FlashMLA, GDN) increasingly run as **persistent fused megakernels**: warps inside each CTA split up data loading, matrix math, and inter-GPU communication, hiding latency behind multi-stage **asynchronous hardware pipelines** (NVIDIA `cp.async` / TMA / `wgmma` / `tcgen05`, AMD `buffer_load` / `vmcnt` / `MFMA`). Tuning them comes down to two numbers: **in-flight depth `d`** (how many async operations are concurrently in flight) and **Exposed Wait** (how much time warps actually spend stalled at wait instructions).
+Modern LLM kernels (MegaMoE, FlashAttention-3, FlashMLA, GDN) increasingly run as **persistent fused megakernels**: warps inside each CTA split up data loading, matrix math, and inter-GPU communication, hiding latency behind multi-stage **asynchronous hardware pipelines** (NVIDIA `cp.async` / TMA / `wgmma` / `tcgen05`, AMD `buffer_load` / `vmcnt` / `MFMA`).
 
 Existing hardware profilers and free-form LLM code edits hit three practical roadblocks:
 
-1. **Free-form code edits break traces without verification**: Vendor profilers (`nsys`, `rocprofv3`) treat each kernel launch as a black box. Asking an LLM to rewrite kernel source for instrumentation routinely leaves unpaired spans across branches, misses warps, overflows buffers, or slows down hot loops.
-2. **Async instructions get mismeasured as instant synchronous calls**: Source-level probes close right after non-blocking issue, missing lowered commit/wait points (such as Triton's `commit_group` / `wait_group` or AMD's `s_waitcnt vmcnt(N)`). Load durations look `30×–120×` shorter than reality, in-flight depth reads `d = 0`, and real wait stalls get lumped into compute stages.
+1. **Free-form code edits break traces without verification**: Vendor profilers (`nsys`, `rocprofv3`) treat each kernel launch as a black box. Asking an LLM to rewrite kernel source for instrumentation routinely misses warps, overflows buffers, or slows down hot loops.
+2. **Async instructions get mismeasured as instant synchronous calls**: Source-level probes close right after non-blocking issue, missing lowered commit/wait points (such as Triton's `commit_group` / `wait_group` or AMD's `s_waitcnt vmcnt(N)`), making load durations look `30×–120×` shorter than reality.
 3. **Heavy recorder state triggers register spills or occupancy cliffs**: Production fused kernels run right up against register and shared-memory limits. Adding 4–10 live registers causes `STL/LDL` local-memory spills, while kilobyte shared-memory buffers drop occupancy (e.g., `2 → 1 CTA/SM`).
 
 ---
