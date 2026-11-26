@@ -6,8 +6,6 @@ import contextlib
 import gzip
 import io
 import json
-import sqlite3
-import subprocess
 import sys
 import tempfile
 import unittest
@@ -223,65 +221,6 @@ class CanonicalSummaryTests(unittest.TestCase):
         self.assertEqual(filtered['simd_util']['samples'], [[1000, 10.0], [1500, 30.0]])
         self.assertTrue(filtered['tensor_util']['_window_filtered'])
         self.assertTrue(filtered['simd_util']['_window_filtered'])
-
-
-class ExtractIntegrationTests(unittest.TestCase):
-    def test_extract_cli_writes_hardware_summary(self):
-        with tempfile.TemporaryDirectory(prefix='weaveprofiler-util-extract-') as td:
-            root = Path(td)
-            db = root / 'capture.sqlite'
-            conn = sqlite3.connect(db)
-            conn.execute('CREATE TABLE StringIds (id INTEGER PRIMARY KEY, value TEXT)')
-            conn.execute("INSERT INTO StringIds VALUES (11, 'demo_kernel(float*)')")
-            conn.execute(
-                'CREATE TABLE CUPTI_ACTIVITY_KIND_KERNEL ('
-                'correlationId INTEGER, deviceId INTEGER, start INTEGER, end INTEGER, '
-                'demangledName INTEGER)')
-            conn.execute('INSERT INTO CUPTI_ACTIVITY_KIND_KERNEL VALUES (7,0,0,5000,11)')
-            conn.execute(
-                'CREATE TABLE TARGET_INFO_GPU_METRICS '
-                '(metricId INTEGER, metricName TEXT, typeId INTEGER)')
-            names = [
-                'GPU Throughput [Throughput %]',
-                'DRAM Read Bandwidth [Throughput %]',
-                'DRAM Write Bandwidth [Throughput %]',
-                'NVLink TX Requests User Data [Throughput %]',
-                'SMs Active [Throughput %]',
-            ]
-            conn.executemany(
-                'INSERT INTO TARGET_INFO_GPU_METRICS VALUES (?,?,?)',
-                [(index + 1, name, 1) for index, name in enumerate(names)])
-            conn.execute(
-                'CREATE TABLE GPU_METRICS '
-                '(timestamp INTEGER, metricId INTEGER, value REAL, typeId INTEGER)')
-            rows = []
-            for index in range(3):
-                timestamp = 1000 + index * 1000
-                for metric_id in range(1, len(names) + 1):
-                    rows.append((timestamp, metric_id, float(metric_id * 10), 1))
-            conn.executemany('INSERT INTO GPU_METRICS VALUES (?,?,?,?)', rows)
-            conn.commit()
-            conn.close()
-
-            out = root / 'hw.json'
-            command = [
-                sys.executable, '-B', str(PROFILE / 'extract_gpu_metrics.py'),
-                '--sqlite', str(db), '--kernel-name-contains', 'demo_kernel',
-                '--out', str(out), '--keep-all', '--backend', 'sqlite',
-                '--margin-frac', '0', '--communication-scope', 'same_host',
-            ]
-            process = subprocess.run(command, stdout=subprocess.PIPE,
-                                     stderr=subprocess.STDOUT, text=True,
-                                     timeout=60)
-            self.assertEqual(process.returncode, 0, process.stdout)
-            document = json.loads(out.read_text(encoding='utf-8'))
-            hardware = document['hardware_summary']
-            self.assertEqual(set(hardware['metrics']), set(CANONICAL_METRIC_IDS))
-            self.assertEqual(hardware['metrics']['compute_util']['value'], 10.0)
-            self.assertEqual(hardware['metrics']['memory_util']['value'], 50.0)
-            self.assertEqual(hardware['metrics']['communication_util']['value'], 40.0)
-            self.assertEqual(hardware['metrics']['sm_active']['value'], 50.0)
-            self.assertEqual(hardware['metrics']['communication_util']['scope'], 'same_host')
 
 
 class MergeIntegrationTests(unittest.TestCase):

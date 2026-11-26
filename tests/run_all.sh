@@ -332,9 +332,6 @@ run_item "PROBE tests/test_probe_pipeline.py" "${PY_RUN[@]}" tests/test_probe_pi
 run_item "EXPERIMENTS tests/experiments/test_direct_probe_agent.py" \
   "${PY_RUN[@]}" tests/experiments/test_direct_probe_agent.py
 run_item "CLI tests/test_run_cli.py" "${PY_RUN[@]}" tests/test_run_cli.py
-run_item "GEMM tests/test_gemm_probe_unit.py" "${PY_RUN[@]}" tests/test_gemm_probe_unit.py
-run_item "CAPTURE tests/test_capture_nsys_contract.py" \
-  "${PY_RUN[@]}" tests/test_capture_nsys_contract.py
 run_item "CAPTURE tests/test_capture_rocm_paths_heartbeat.py" \
   "${PY_RUN[@]}" tests/test_capture_rocm_paths_heartbeat.py
 
@@ -347,18 +344,10 @@ run_item "CAPTURE tests/test_build_rocprof_sw_hw.py" \
   "${PY_RUN[@]}" tests/test_build_rocprof_sw_hw.py
 run_item "CAPTURE tests/test_build_rocprof_sys_sw_hw.py" \
   "${PY_RUN[@]}" tests/test_build_rocprof_sys_sw_hw.py
-run_item "CAPTURE tests/test_trace_processor_fallback.py" \
-  "${PY_RUN[@]}" tests/test_trace_processor_fallback.py
 run_item "CAPTURE tests/test_rocprof_sys_adapter.py" \
   "${PY_RUN[@]}" tests/test_rocprof_sys_adapter.py
-run_item "CAPTURE tests/metrics_window_check.py" \
-  "${PY_RUN[@]}" tests/metrics_window_check.py
 run_item "DECODE tests/decode_roundtrip.py" \
   "${PY_RUN[@]}" tests/decode_roundtrip.py
-run_item "ALIGN weaveprof/pipeline/validate/tools/fi_align_nsys.py --selftest" \
-  "${PY_RUN[@]}" weaveprof/pipeline/validate/tools/fi_align_nsys.py --selftest
-run_item "GATE weaveprof/pipeline/validate/tools/fi_trace_gate.py --selftest" \
-  "${PY_RUN[@]}" weaveprof/pipeline/validate/tools/fi_trace_gate.py --selftest
 run_item "RECORDER tests/frontend_api_check.py" \
   "${PY_RUN[@]}" tests/frontend_api_check.py
 run_item "RECORDER tests/test_hip_recorder.py --compile-only" \

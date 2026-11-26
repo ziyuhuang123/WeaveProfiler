@@ -102,68 +102,25 @@ All commands enter through [run.py](run.py). Use absolute project, run, and evid
 
 ```bash
 python3 -B run.py capture --card mi308x [--arch gfx942] --project P --out RUN [--collector auto|rocprof-sys|rocprofv3] [--deadline ISO8601_UTC] [--heartbeat PATH] --payload CMD [ARG...]
-python3 -B run.py gemm-probe --card h20 --arch sm_90 --profile full|quick [--shape MxNxK] --gpu auto --out RUN --deadline-sec 1800 [--trace-processor PATH]
 ```
 `run.py capture` is AMD MI308X only; on NVIDIA (`h20`/`b300`/`sm86`), use MCP tool `weaveprof_megakernel_audit` with `"capture_nsys": true` (`python3 -B weaveprof/aka_adapter.py megakernel-audit < tmp/request.json`) or run `nsys profile` directly (lines 39, 49).
 
-B300 commands must pass the exact `--arch`; H20 and MI308X may omit it when `--card` resolves one architecture. Repeat `--source`/`--glob` to select multiple inputs. All staged and agent commands route through `run.py` (18 registered subcommands).
+B300 commands must pass the exact `--arch`; H20 and MI308X may omit it when `--card` resolves one architecture. Repeat `--source`/`--glob` to select multiple inputs. All staged and agent commands route through `run.py` (16 registered subcommands).
 
-## GEMM probe fast path
+## Profiling GEMM and Custom Kernels
 
-For a one-command GEMM software/hardware measurement, use `gemm-probe`. It owns the full path: idle H20 selection, hash-cached off/entry/full builds, randomized repeated benchmarking, full-output verification, NCU HMMA comparison, 200 kHz NSYS capture, software decode, counter extraction, one-time-base alignment, and a real Perfetto import. The default 30-minute deadline is a hard process-tree deadline, not a suggestion.
+No direct replacement exists for standalone synthetic multi-tier GEMM benchmark sweeps. To instrument, verify, and render a 4-panel SW+HW `overview.png` for a real GEMM or custom GPU kernel without modifying production source files, use the closed-loop profiler or isolated-copy megakernel audit:
 
-```bash
-# Fast integration feedback: 512x512x512, 3 rounds, 2 capture launches,
-# NCU skipped, full-output checks and real Perfetto import retained.
-python3 -B run.py gemm-probe --card h20 --arch sm_90 --profile quick --gpu auto \
-  --out /absolute/new/quick-run --deadline-sec 300
-
-# Final measurement: full shape, 35 full-output runs, NCU, 200 kHz NSYS.
-python3 -B run.py gemm-probe --card h20 --arch sm_90 --profile full --gpu auto \
-  --out /absolute/new/full-run --deadline-sec 1800
-```
-
-Run `quick` first and `full` once after quick passes. `quick` uses `512x512x512`, 3 benchmark rounds, 2 hardware-capture launches, and 15 independent full-output checks. It skips NCU but still performs the real Perfetto import. Its overhead percentage is diagnostic only: fixed per-CTA probe cost is amplified by the small shape, so quick does not enforce the delivery overhead threshold. `full` uses `2048x2048x4096`, 7 rounds (35 runs), NCU, and the complete overhead gate. Neither profile is a delivery receipt (`delivery_evidence=false`).
-
-Measured on H20 on 2026-11-14 with a warm build cache: `quick=20.448 s`; `full=63.701 s`. The previous full path was `98.446 s`. The improvement comes from using gzip level 3 for large Chrome JSON debug traces (about 1 s instead of 12 s at level 9), optional `msgspec` encoding, and decoding a dump once before alignment. The level-3 debug trace is 18.2 MB instead of 14.9 MB and imports the same 1,050,704 slices with zero forbidden stats; do not restore level 9 without measuring end-to-end cost.
-
-### Two-pass integration loop
-
-Use this loop for every GEMM instrumentation attempt; it is the default way to spend the time budget.
-
-1. **Survey with one `quick` path.** Start a fresh quick run and record every failure it exposes in one ledger: build/compile, ABI, correctness, software trace, decode, hardware capture, alignment, and trace import. The probe may stop at a blocking failure. Fix only that blocker, rerun from the last reusable cached stage, and continue the same survey until trace import succeeds or every reachable failure class is recorded. Do not start `full`, NCU, or a long NSYS capture while quick is red, and do not polish downstream code speculatively.
-2. **Batch repairs.** Once quick reaches trace import, or every reachable stage has produced evidence, group failures by stage and fix independent issues in one edit batch. Use CPU-only checks such as compile preflight, decoder roundtrip, alignment fixtures, and trace import while preparing the batch. Do not pay for a GPU capture after each small edit.
-3. **Rerun from the earliest changed dependency.** Use artifact hashes and stage manifests to choose the first invalid stage. Reuse unchanged builds, dumps, decoded traces, and counters. A second quick run is justified to verify the repaired integration path; further runs need a named, new failure.
-4. **Promote once.** Run `full` after quick passes, as the final correctness and performance measurement. If full exposes a condition that quick could not exercise, preserve that run, make a concrete fix, and rerun only the affected full stages when their caches remain valid; do not return to exploratory all-stage loops.
-
-Keep a short failure ledger with the stage, first failing command, artifact path, input hashes, whether the failure blocks downstream stages, and the earliest reusable stage. Choose the next action from that ledger rather than retrying the whole chain by habit.
-
-- Generate FP16 inputs with `curandGenerateNormal`, compute an independent FP32 reference, and compare every element of every output on every benchmark variant. A pass requires `mismatches_total=0` and `nonfinite_total=0`; never sample the output or compare the kernel with itself.
-- Decode each immutable dump once. `alignment` must consume the decoder's software trace and summary through `fi_align_nsys.py --decoded-trace ... --decoded-summary ...`. The summary binds the dump SHA, names/semantics SHA, and decoder SHA; reject stale caches instead of silently mixing runs.
-- For trace-only failures, reuse `hardware/gemm_nsys.fi.bin`, `hardware/capture.sqlite`, and the decoded software artifacts. Rerun alignment offline; rerun only decode if the decoder or names contract changed. Do not rerun benchmark, NCU, or NSYS for a formatting/merge fix:
-
-```bash
-python3 -B "$SKILL/weaveprof/pipeline/validate/tools/fi_align_nsys.py" \
-  "$RUN/hardware/gemm_nsys.fi.bin" \
-  --names "$SKILL/configs/templates/gemm_probe/names.json" \
-  --sqlite "$RUN/hardware/capture.sqlite" --kernel gemm_wmma --instance -1 \
-  --metrics 'SMs Active|SM Issue|Tensor Active|SM Tensor Pipe Active|DRAM Read|DRAM Write' \
-  --min-metrics-samples 3 --min-metric-curves 6 \
-  --decoded-trace "$RUN/software/gemm_sw.perfetto.json.gz" \
-  --decoded-summary "$RUN/software/gemm_sw.summary.json" \
-  -o "$RUN/alignment/gemm_sw_hw.perfetto.json"
-```
-
-- Use hard iteration checkpoints: quick integration should finish within 10 minutes, and the full evidence path within 30 minutes. If either slips, preserve the failed run and stop repeating the whole pipeline; identify the last reusable artifact and fix only the failing downstream stage. A two-hour debugging loop followed by a sub-two-minute final run is a workflow failure, not a fast result.
-- The bundled `gemm_wmma` kernel is a self-contained `nvcuda::wmma` correctness/capture fixture, not an H20 performance reference. When instrumenting a real operand GEMM, edit and measure that target's actual mainloop (including WGMMA/CUTLASS where present). Never relabel a WMMA fixture as WGMMA or infer WGMMA utilization from it.
-- Keep workflow profiles and recorder capture settings separate. `--profile quick|full` changes the benchmark and validation matrix. WeaveProfiler enforces full-audit profiling without ad-hoc loop sampling: when inner-loop density triggers an unrolling cliff or pushes overhead > 10%, closed-loop Scheme A coarsening deterministically hoists/merges probes outward to enclosing stage boundaries.
-- Report `detached` and `attached` measurements separately. Detached isolates the entry-side probe cost; only `full:attached` includes the recorder's actual write cost. Never present detached overhead as the recorder write cost.
-- Calibrate registers from the target build's own `ptxas -v` evidence, using the maximum observed register count among the spill-free baseline variants as the candidate seed. Compile one candidate at a time and select the smallest cap with zero spill loads, zero spill stores, and zero stack. An H20 run may select 80 registers; that is measured evidence, never a default and never a rule to set `maxrregcount=80` everywhere.
-- Read `%globaltimer` only on the thread that records the event. Hoisting the timer read across the whole block changes the measurement itself.
-- Cache builds by source hash, recorder hash, exact architecture, NVCC identity, defines, and register-calibration policy. A warm cache should skip compilation and ptxas searches; retain the cache metadata so the selected variant remains auditable.
-- Select only an idle GPU whose `nvidia-smi` model matches the requested card. Set `CUDA_DEVICE_ORDER=PCI_BUS_ID`, keep physical index/UUID mappings in the manifest, and never evict or kill another user's process.
-- Verify the trace by importing it with `trace_processor_shell`, checking forbidden import stats, minimum slice count, and real counter tracks. Successful JSON parsing alone is not trace-import evidence.
-- Preserve failing manifests and logs. `gemm-probe` is a measurement probe and always sets `delivery_evidence=false`; it cannot substitute for `deliver` or a delivery receipt.
+- **MCP agent tools** ([mcp_server.py](weaveprof/mcp_server.py)):
+  - `weaveprof_profile` (`source`, `bench`, optional `card`, `limit`, `max_rounds`, `out`) — closed-loop Stage Identifier + 4-gate Trace Verifier (`profile_for_agent`) with HMAC episode sealing.
+  - `weaveprof_megakernel_audit` (`workspace`, `entry_source`, `bench_cmd`, optional `inst_files`, `build_cmd`, `capture_nsys`, `nsys_freq_hz`, `render_overview_png`, `limit`, `out_dir`) — isolated-copy audit with 200 kHz `nsys` hardware curves (`"capture_nsys": true`), 4-panel `overview.png`, causal bottleneck report, and session seal.
+- **CLI & Python SDK** ([cli.py](weaveprof/cli.py), [api.py](weaveprof/api.py), [aka_adapter.py](weaveprof/aka_adapter.py)):
+  ```bash
+  weaveprof profile --source <kernel_source> --card <h20|b300|mi308x|sm86> --limit 0.10 -o overview.png -- <bench_cmd...>
+  python3 -B run.py profile --source <kernel_source> --card <h20|b300|mi308x|sm86> --limit 0.10 -o overview.png -- <bench_cmd...>
+  python3 -B weaveprof/aka_adapter.py profile < request.json
+  python3 -B weaveprof/aka_adapter.py megakernel-audit < request.json
+  ```
 
 ## Knowledge routing
 
@@ -200,7 +157,6 @@ MI308X uses one canonical same-run rocprof-sys hardware layer, with optional ind
 - rocprofv3 `MfmaUtil` is an optional independent calibration/fallback source, not the primary MI308X source. If used, label `rocprofv3:MfmaUtil` explicitly, use it directly as a percent rather than multiplying by 100, and keep fallback or calibration evidence separate from same-run rocprof-sys points.
 - Optional amd-smi `gpu_busy`, `memory_busy`, and `gpu_memory_used_mib` polling tracks are coarse debug context only. They retain `canonical_mapping=null` and `auxiliary_only=true`; no amd-smi GPU-busy, memory-busy, or memory-used curve may be presented as `compute_util` or `memory_util`. The kernel selector defaults to the legacy `mfma_kernel`; for GEMM, pass the real name with `--kernel-name-contains`.
 - ROCm PM counters are per-dispatch aggregates. Do not claim intra-dispatch resolution. A zero boundary after a measured span is a display break, not a missing-evidence sample.
-- [get_trace_processor.py](weaveprof/pipeline/scan/get_trace_processor.py) verifies a real import before accepting a trace processor. On hosts whose glibc is too old for the current Perfetto release, it retries the pinned, SHA256-verified v47 linux-x86_64 binary and records the reason in a fallback metadata file next to the selected binary.
 
 **validate.** Validate the completed capture against the instrumented artifact and its edit evidence:
 

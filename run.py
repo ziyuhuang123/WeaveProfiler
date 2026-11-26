@@ -203,14 +203,6 @@ def _capture(argv: Sequence[str]) -> int:
                          phase="capture")
 
 
-def _gemm_probe(argv: Sequence[str]) -> int:
-    return _run_python("weaveprof/pipeline/capture/gemm_probe.py", argv)
-
-
-def _auto_gemm(argv: Sequence[str]) -> int:
-    return _run_python("weaveprof/pipeline/capture/auto_gemm.py", argv)
-
-
 def _probe_place(argv: Sequence[str]) -> int:
     return _run_python("weaveprof/pipeline/scan/llm_probe_placer.py", argv)
 
@@ -246,8 +238,6 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         return 0
     command, rest = args[0], args[1:]
     handlers = {"capture": _capture,
-                "gemm-probe": _gemm_probe,
-                "auto-gemm": _auto_gemm,
                 "probe-place": _probe_place, "probe-reuse": _probe_reuse,
                 "probe-inject": _probe_inject,
                 "install-agent": _install_agent, "guard-exec": _guard_exec,

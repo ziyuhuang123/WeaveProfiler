@@ -35,14 +35,7 @@ REQUIRED_FILES = [
     "recorders/triton/wp_triton.py",
     "recorders/triton/wp_triton_amd.py",
     "recorders/cutedsl/wp_cute.py",
-    "weaveprof/pipeline/scan/get_trace_processor.py",
-    "weaveprof/pipeline/capture/capture_nsys.py", "weaveprof/pipeline/capture/capture_rocm.py",
-    "weaveprof/pipeline/capture/gemm_probe.py",
-    "configs/templates/gemm_probe/gemm.cu",
-    "configs/templates/gemm_probe/names.json",
-    "configs/templates/gemm_probe/metrics.json",
-    "configs/templates/gemm_probe/gemm_h20.config",
-    "weaveprof/pipeline/capture/extract_gpu_metrics.py",
+    "weaveprof/pipeline/capture/capture_rocm.py",
     "weaveprof/pipeline/capture/build_rocprof_sw_hw.py", "weaveprof/pipeline/capture/build_rocprof_sys_sw_hw.py",
     "weaveprof/pipeline/capture/hardware_utilization.py", "weaveprof/pipeline/capture/merge_hw_into_perfetto.py",
     "configs/semantic_ids.json", "configs/operators/operators.json",
@@ -69,7 +62,7 @@ LANGUAGE_FILES = [
 CURVES = {"compute_util", "memory_util", "communication_util", "sm_active"}
 CHECKS = {"correctness", "overhead", "assembly_change_rate", "alignment",
           "buffer_completeness", "overflow"}
-REQUIRED_COMMANDS = {"capture", "gemm-probe"}
+REQUIRED_COMMANDS = {"capture"}
 LINK_RX = re.compile(r"\[[^\]]+\]\(([^)#]+)(?:#[^)]+)?\)")
 PATH_REF_RX = re.compile(r"`([A-Za-z0-9_./-]+\.(?:py|cuh|h|cpp|cu|json|sh|md|config))`")
 
@@ -260,7 +253,7 @@ def _check_run_interface(fails: list[str]) -> None:
     for command in REQUIRED_COMMANDS:
         if '"{}"'.format(command) not in text:
             fails.append("run.py dispatch missing command: {}".format(command))
-    for token in ('capture_rocm.py', 'gemm_probe.py', 'rocprof-sys', 'rocprofv3',
+    for token in ('capture_rocm.py', 'rocprof-sys', 'rocprofv3',
                   'heartbeat', '--deadline', 'delivery_evidence'):
         if token not in text and token != 'delivery_evidence':
             fails.append("run.py/capture integration missing {}".format(token))

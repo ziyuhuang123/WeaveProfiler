@@ -72,11 +72,6 @@ class RunCliTest(unittest.TestCase):
     def assert_success(self, completed: subprocess.CompletedProcess[str]) -> None:
         self.assertEqual(0, completed.returncode, self.command_diagnostic(completed))
 
-    def test_gemm_probe_dispatches_to_the_packaged_probe(self) -> None:
-        completed = self.run_cli(("gemm-probe", "--help"))
-        self.assert_success(completed)
-        self.assertTrue(completed.stdout.lstrip().startswith("usage: gemm_probe.py"))
-
     def test_capture_routes_amd_help_without_starting_gpu_work(self) -> None:
         mi308x = self.run_cli(
             (
