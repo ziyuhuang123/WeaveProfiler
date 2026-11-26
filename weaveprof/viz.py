@@ -17,13 +17,327 @@ import sys
 
 sys.dont_write_bytecode = True
 
+import datetime as _dt
 import gzip
 import json
 import math
+import os
 import re
 from collections import defaultdict
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
+
+_MODEL_TOKEN_RE = re.compile(
+    r"(?<![a-z0-9])((?:qwen|deepseek|llama|mistral|mixtral|gemma|glm|kimi|gpt|claude|internlm|yi|baichuan|minimax|phi|nemotron)"
+    r"[a-z0-9.-]{0,24})(?![a-z0-9])",
+    re.I,
+)
+_OP_ALIASES: Tuple[Tuple[re.Pattern, str], ...] = (
+    (re.compile(r"(?:flash[_\-\s]?attention|attention|(?:^|[_\-\s./])(?:flash[_\-\s]?attn\d*|flash[_\-\s]?mla|flash[_\-\s]?kda|fa[23]|mla|kda|sdpa|mqa|gdn|attn)(?:$|[_\-\s./0-9]))", re.I), "attn"),
+    (re.compile(r"(?:megamoe|fused[_\-\s]?moe|(?:^|[_\-\s./])moe(?:$|[_\-\s./0-9]))", re.I), "moe"),
+    (re.compile(r"(?:gemm|matmul|(?:^|[_\-\s./])(?:wgmma|wmma|mfma|scaled[_\-]?mm|dot)(?:$|[_\-\s./0-9]))", re.I), "gemm"),
+    (re.compile(r"(?:convolution|(?:^|[_\-\s./])(?:conv[123]d|causal[_\-]?conv|conv)(?:$|[_\-\s./0-9]))", re.I), "conv"),
+    (re.compile(r"(?:rmsnorm|layernorm|groupnorm|(?:^|[_\-\s./])norm(?:$|[_\-\s./0-9]))", re.I), "norm"),
+    (re.compile(r"softmax", re.I), "softmax"),
+    (re.compile(r"(?:allreduce|allgather|alltoall|(?:^|[_\-\s./])(?:scatter|combine|reduce)(?:$|[_\-\s./0-9]))", re.I), "comm"),
+)
+
+
+def _sanitize_fname_token(raw: Any, fallback: str, *, max_len: int = 32, keep_dots: bool = False) -> str:
+    s = str(raw or "").strip().lower()
+    if not s:
+        return fallback
+    pat = r"[^a-z0-9._-]+" if keep_dots else r"[^a-z0-9_-]+"
+    s = re.sub(pat, "-", s)
+    s = re.sub(r"[-_]{2,}", "-", s).strip("._-")
+    if not s:
+        return fallback
+    return s[:max_len].rstrip("._-") or fallback
+
+
+def _extract_model_name(
+    meta: Mapping[str, Any],
+    other: Mapping[str, Any],
+    workload: Mapping[str, Any],
+    runtime: Mapping[str, Any],
+    spec: Mapping[str, Any],
+    texts: Sequence[str],
+    explicit: Optional[str],
+) -> str:
+    for cand in (
+        explicit,
+        os.environ.get("WEAVEPROF_WORKLOAD_MODEL"),
+        meta.get("model"),
+        meta.get("model_name"),
+        meta.get("workload_model"),
+        other.get("model"),
+        other.get("model_name"),
+        workload.get("model"),
+        workload.get("model_name"),
+        runtime.get("workload_model"),
+        runtime.get("model_name"),
+        runtime.get("model"),
+        spec.get("workload_model"),
+        spec.get("model_name"),
+    ):
+        if cand is not None and str(cand).strip() and str(cand).strip().lower() not in ("auto", "none", "unknown"):
+            return _sanitize_fname_token(cand, "model", max_len=32, keep_dots=True)
+    for txt in texts:
+        if not txt:
+            continue
+        m = _MODEL_TOKEN_RE.search(txt)
+        if m:
+            return _sanitize_fname_token(m.group(1), "model", max_len=32, keep_dots=True)
+    return "model"
+
+
+def _extract_op_name(
+    meta: Mapping[str, Any],
+    other: Mapping[str, Any],
+    workload: Mapping[str, Any],
+    runtime: Mapping[str, Any],
+    spec: Mapping[str, Any],
+    texts: Sequence[str],
+    source: Optional[str | Path],
+    explicit: Optional[str],
+) -> str:
+    if explicit is not None and str(explicit).strip():
+        return _sanitize_fname_token(explicit, "kernel", max_len=24)
+    for cand in (
+        meta.get("op"),
+        meta.get("operator"),
+        meta.get("operator_family"),
+        other.get("op"),
+        other.get("operator"),
+        workload.get("op"),
+        workload.get("operator"),
+        runtime.get("op"),
+        runtime.get("operator"),
+        runtime.get("kernel_class"),
+        spec.get("operator_family"),
+    ):
+        if cand is not None and str(cand).strip():
+            raw = str(cand).strip()
+            for rx, norm in _OP_ALIASES:
+                if rx.search(raw):
+                    return norm
+            return _sanitize_fname_token(raw, "kernel", max_len=24)
+    for txt in texts:
+        if not txt:
+            continue
+        for rx, norm in _OP_ALIASES:
+            if rx.search(txt):
+                return norm
+    if source:
+        stem = Path(str(source)).stem
+        if stem:
+            return _sanitize_fname_token(stem, "kernel", max_len=24)
+    return "kernel"
+
+
+def _extract_shape_token(
+    meta: Mapping[str, Any],
+    other: Mapping[str, Any],
+    workload: Mapping[str, Any],
+    runtime: Mapping[str, Any],
+    spec: Mapping[str, Any],
+    texts: Sequence[str],
+    *,
+    bs: Optional[Any] = None,
+    seql: Optional[Any] = None,
+    kv: Optional[Any] = None,
+    shape: Optional[str] = None,
+    dims: Optional[Mapping[str, Any]] = None,
+) -> str:
+    if shape is not None and str(shape).strip():
+        return _sanitize_fname_token(str(shape).replace("×", "x"), "shape", max_len=48)
+
+    merged: Dict[str, Any] = {}
+    for src_map in (spec, runtime, other, meta, workload, dims or {}):
+        if isinstance(src_map, Mapping):
+            for k, v in src_map.items():
+                if v is not None and str(v).strip() != "":
+                    merged[str(k).lower()] = v
+    if bs is not None:
+        merged["bs"] = bs
+    if seql is not None:
+        merged["seql"] = seql
+    if kv is not None:
+        merged["kv"] = kv
+
+    def _pick(*keys: str) -> Optional[str]:
+        for k in keys:
+            v = merged.get(k)
+            if v is not None and str(v).strip() != "":
+                s = str(v).strip()
+                if re.fullmatch(r"[0-9]+(?:\.[0-9]+)?[kKmM]?", s):
+                    return s.lower()
+        return None
+
+    v_bs = _pick("bs", "batch", "batch_size", "b")
+    v_sq = _pick("seql", "seq_len", "seqlen", "sq", "s", "t", "tokens", "n_tokens")
+    v_kv = _pick("kv", "kv_len", "kvlen", "kv_seq_len")
+    v_h = _pick("h", "heads", "num_heads")
+    v_d = _pick("d", "head_dim", "headdim")
+    v_m = _pick("m")
+    v_n = _pick("n")
+    v_k = _pick("k")
+    v_e = _pick("e", "experts", "num_experts")
+    v_ep = _pick("ep")
+
+    blob = " ".join(t for t in texts if t)
+    if blob:
+        if v_bs is None:
+            m = re.search(r"(?:\bbs|\bbatch(?:_size)?|\bB)\s*[=:]?\s*(\d+)\b", blob)
+            if m:
+                v_bs = m.group(1)
+        if v_sq is None:
+            m = re.search(r"(?:\bseql|\bseq_?len|\bsq|\bS|\bT)\s*[=:]?\s*(\d+)\b", blob)
+            if m:
+                v_sq = m.group(1)
+        if v_kv is None:
+            m = re.search(r"(?:\bkv(?:_?len)?|\bKV)\s*[=:]?\s*(\d+)\b", blob)
+            if m:
+                v_kv = m.group(1)
+        if v_h is None:
+            m = re.search(r"(?:\bH|\bheads)\s*=\s*(\d+)\b", blob)
+            if m:
+                v_h = m.group(1)
+        if v_d is None:
+            m = re.search(r"(?:\bD|\bhead_dim)\s*=\s*(\d+)\b", blob)
+            if m:
+                v_d = m.group(1)
+        if v_e is None:
+            m = re.search(r"\bE\s*=\s*(\d+)\b", blob)
+            if m:
+                v_e = m.group(1)
+        if v_ep is None:
+            m = re.search(r"\bEP\s*=\s*(\d+)\b", blob, re.I)
+            if m:
+                v_ep = m.group(1)
+        if v_m is None and v_n is None and v_k is None:
+            m_mnk = re.search(r"\b(\d{2,6})\s*[x×]\s*(\d{2,6})\s*[x×]\s*(\d{2,6})\b", blob)
+            if m_mnk:
+                v_m, v_n, v_k = m_mnk.group(1), m_mnk.group(2), m_mnk.group(3)
+            else:
+                m_cube = re.search(r"\b(\d{2,6})\s*[³\^3]\b", blob)
+                if m_cube:
+                    v_m = v_n = v_k = m_cube.group(1)
+
+    parts: List[str] = []
+    if v_bs is not None:
+        parts.append(f"bs{v_bs}")
+    if v_sq is not None:
+        parts.append(f"seql{v_sq}")
+    if v_kv is not None:
+        parts.append(f"kv{v_kv}")
+    if v_h is not None:
+        parts.append(f"h{v_h}")
+    if v_d is not None:
+        parts.append(f"d{v_d}")
+    if v_m is not None or v_n is not None or v_k is not None:
+        if v_m is not None:
+            parts.append(f"m{v_m}")
+        if v_n is not None:
+            parts.append(f"n{v_n}")
+        if v_k is not None:
+            parts.append(f"k{v_k}")
+    if v_e is not None:
+        parts.append(f"e{v_e}")
+    if v_ep is not None:
+        parts.append(f"ep{v_ep}")
+
+    if parts:
+        return "_".join(parts)
+
+    # Fallback to observed launch geometry (CTAs / warps) if workload dims were absent
+    al = other.get("alignment") if isinstance(other.get("alignment"), Mapping) else {}
+    ctas = merged.get("grid_ctas") or merged.get("n_ctas") or al.get("n_ctas")
+    wpc = merged.get("warps_per_cta") or merged.get("wpc") or al.get("warps_per_cta")
+    g_parts: List[str] = []
+    if ctas is not None:
+        g_parts.append(f"grid{int(ctas)}")
+    if wpc is not None:
+        g_parts.append(f"w{int(wpc)}")
+    return "_".join(g_parts) if g_parts else "shape"
+
+
+def build_timeline_png_name(
+    trace: Optional[Mapping[str, Any]] = None,
+    *,
+    model: Optional[str] = None,
+    op: Optional[str] = None,
+    bs: Optional[Any] = None,
+    seql: Optional[Any] = None,
+    kv: Optional[Any] = None,
+    shape: Optional[str] = None,
+    dims: Optional[Mapping[str, Any]] = None,
+    title: Optional[str] = None,
+    subtitle: Optional[str] = None,
+    source: Optional[str | Path] = None,
+    spec: Optional[Mapping[str, Any]] = None,
+    runtime: Optional[Mapping[str, Any]] = None,
+    timestamp: Optional[str | _dt.datetime] = None,
+) -> str:
+    """Build a descriptive timeline PNG filename: ``<model>_<op>_<shape>_<YYYYMMDD_HHMMSS>.png``.
+
+    Encodes model name, operator (e.g. ``gemm``, ``attn``, ``moe``), workload dimensions
+    (``bs``, ``seql``, ``kv``, ``m/n/k``, etc.), and date-time stamp so repeated runs never
+    collide on a generic ``overview.png``.
+    """
+    other = trace.get("otherData") if (isinstance(trace, Mapping) and isinstance(trace.get("otherData"), Mapping)) else {}
+    meta = other.get("meta") if isinstance(other.get("meta"), Mapping) else {}
+    workload = other.get("workload") if isinstance(other.get("workload"), Mapping) else {}
+    rt = runtime if isinstance(runtime, Mapping) else {}
+    sp = spec if isinstance(spec, Mapping) else {}
+
+    kernel_hint = (
+        meta.get("kernel")
+        or rt.get("kernel_name")
+        or sp.get("kernel_name")
+        or (other.get("nsys_hw") or {}).get("kernel_name")
+        or ""
+    )
+    texts = [
+        str(title or ""),
+        str(subtitle or ""),
+        str(kernel_hint or ""),
+        str(source or ""),
+    ]
+
+    model_tok = _extract_model_name(meta, other, workload, rt, sp, texts, model)
+    op_tok = _extract_op_name(meta, other, workload, rt, sp, texts, source, op)
+    shape_tok = _extract_shape_token(
+        meta, other, workload, rt, sp, texts,
+        bs=bs, seql=seql, kv=kv, shape=shape, dims=dims,
+    )
+    if isinstance(timestamp, _dt.datetime):
+        ts_tok = timestamp.strftime("%Y%m%d_%H%M%S")
+    elif isinstance(timestamp, str) and timestamp.strip():
+        ts_tok = _sanitize_fname_token(timestamp, _dt.datetime.now().strftime("%Y%m%d_%H%M%S"), max_len=24)
+    else:
+        ts_tok = _dt.datetime.now().strftime("%Y%m%d_%H%M%S")
+
+    return f"{model_tok}_{op_tok}_{shape_tok}_{ts_tok}.png"
+
+
+def resolve_timeline_png_path(
+    out_png: Optional[str | Path],
+    trace: Optional[Mapping[str, Any]] = None,
+    *,
+    default_dir: Optional[str | Path] = None,
+    **name_kwargs: Any,
+) -> Path:
+    """Resolve an output PNG path; auto-generate ``<model>_<op>_<shape>_<YYYYMMDD_HHMMSS>.png``
+    when ``out_png`` is omitted, ``"auto"``, or points to a directory."""
+    raw = "" if out_png is None else str(out_png).strip()
+    if not raw or raw.lower() == "auto":
+        base = Path(default_dir) if default_dir is not None else Path.cwd()
+        return base / build_timeline_png_name(trace, **name_kwargs)
+    p = Path(out_png)
+    if raw.endswith(("/", "\\")) or (p.exists() and p.is_dir()) or (not p.suffix and not p.exists()):
+        return p / build_timeline_png_name(trace, **name_kwargs)
+    return p
 
 STAGE_COLORS: Dict[str, Tuple[str, str]] = {
     "load": ("#2E7D32", "TMA / Tile Load"),
@@ -1615,7 +1929,7 @@ def _truncate_text_to_px(probe: Any, rnd: Any, text: str, min_keep: int, max_wid
 
 def render_swhw_overview_png(
     trace_or_path: Mapping[str, Any] | str | Path,
-    out_png: str | Path,
+    out_png: Optional[str | Path] = None,
     *,
     title: Optional[str] = None,
     subtitle: Optional[str] = None,
@@ -1625,6 +1939,14 @@ def render_swhw_overview_png(
     dpi: int = 220,
     require_hw_curves: bool = True,
     subplot_lr: Optional[Tuple[float, float]] = None,
+    model: Optional[str] = None,
+    op: Optional[str] = None,
+    bs: Optional[Any] = None,
+    seql: Optional[Any] = None,
+    kv: Optional[Any] = None,
+    shape: Optional[str] = None,
+    dims: Optional[Mapping[str, Any]] = None,
+    timestamp: Optional[str | _dt.datetime] = None,
 ) -> Path:
     """Render a publication-grade SW+HW overview PNG (with on-demand async depth strips, ▼ issue pins & micro-zoom)."""
     render_swhw_overview_png.last_left_rescue_px = 0.0
@@ -2524,7 +2846,23 @@ def render_swhw_overview_png(
                     min(_ba.y1, _bb.y1) - max(_ba.y0, _bb.y0) > 1.5):
                 raise RuntimeError(f"TEXT_OVERLAP in viz.py: {_sa!r} {_ba} overlaps {_sb!r} {_bb}")
 
-    out_path = Path(out_png)
+    default_dir = Path(trace_or_path).resolve().parent if isinstance(trace_or_path, (str, Path)) else None
+    out_path = resolve_timeline_png_path(
+        out_png,
+        trace,
+        default_dir=default_dir,
+        model=model,
+        op=op,
+        bs=bs,
+        seql=seql,
+        kv=kv,
+        shape=shape,
+        dims=dims,
+        title=title,
+        subtitle=subtitle,
+        source=trace_or_path if isinstance(trace_or_path, (str, Path)) else None,
+        timestamp=timestamp,
+    )
     out_path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(str(out_path), dpi=int(dpi), facecolor="#FFFFFF")
     plt.close(fig)
@@ -2533,9 +2871,15 @@ def render_swhw_overview_png(
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
     import argparse
-    ap = argparse.ArgumentParser(description="Render a WeaveProfiler Perfetto trace into a 4-panel SW+HW overview PNG.")
+    ap = argparse.ArgumentParser(description="Render a WeaveProfiler Perfetto trace into a 4-panel SW+HW timeline PNG.")
     ap.add_argument("trace", help="Path to trace.perfetto.json[.gz]")
-    ap.add_argument("-o", "--out", required=True, help="Output PNG path")
+    ap.add_argument("-o", "--out", default=None, help="Output PNG path or directory (default: auto <model>_<op>_<shape>_<YYYYMMDD_HHMMSS>.png)")
+    ap.add_argument("--model", default=None, help="Model name token for auto-generated filename")
+    ap.add_argument("--op", default=None, help="Operator name token for auto-generated filename (e.g. gemm, attn, moe)")
+    ap.add_argument("--bs", default=None, help="Batch size for auto-generated filename")
+    ap.add_argument("--seql", default=None, help="Sequence length for auto-generated filename")
+    ap.add_argument("--kv", default=None, help="KV cache length for auto-generated filename")
+    ap.add_argument("--shape", default=None, help="Explicit shape token (overrides bs/seql/dims in filename)")
     ap.add_argument("--title", default=None)
     ap.add_argument("--subtitle", default=None)
     ap.add_argument("--sm", type=int, default=None, help="Physical SM/CU id to feature in Panel (C)")
@@ -2553,6 +2897,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         args.trace, args.out, title=args.title, subtitle=args.subtitle,
         focus_sm=args.sm, zoom_cta=args.zoom_cta, zoom_window=zw, dpi=args.dpi,
         require_hw_curves=not args.allow_no_hw,
+        model=args.model, op=args.op, bs=args.bs, seql=args.seql, kv=args.kv, shape=args.shape,
     )
     print(f"RENDERED {out} ({out.stat().st_size} bytes)")
     return 0

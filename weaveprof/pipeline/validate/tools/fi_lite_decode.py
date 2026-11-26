@@ -1261,8 +1261,14 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("dump", nargs="?")
     ap.add_argument("--names")
-    ap.add_argument("-o", "--out", help="输出路径：推荐直接传 overview.png（仅出 PNG，不写 .gz）；写 .gz 需显式加 --write-gz")
-    ap.add_argument("--png", help="直接渲染 4-panel SW+HW 概览 PNG（默认不写 .perfetto.json.gz）")
+    ap.add_argument("-o", "--out", help="输出路径或目录：推荐直接传目录或 .png（传目录/auto 时自动按 <model>_<op>_<shape>_<YYYYMMDD_HHMMSS>.png 命名）；写 .gz 需显式加 --write-gz")
+    ap.add_argument("--png", help="直接渲染 4-panel SW+HW 时间线 PNG（传 'auto' 或目录路径时自动命名）")
+    ap.add_argument("--model", default=None, help="模型名（用于自动生成 PNG 文件名）")
+    ap.add_argument("--op", default=None, help="算子名，如 gemm / attn / moe（用于自动生成 PNG 文件名）")
+    ap.add_argument("--bs", default=None, help="batch size（用于自动生成 PNG 文件名）")
+    ap.add_argument("--seql", default=None, help="sequence length（用于自动生成 PNG 文件名）")
+    ap.add_argument("--kv", default=None, help="KV 长度（用于自动生成 PNG 文件名）")
+    ap.add_argument("--shape", default=None, help="显式尺寸标签（覆盖 bs/seql 自动推导）")
     ap.add_argument("--title", default=None, help="PNG 标题（可选）")
     ap.add_argument("--sm", type=int, default=None, help="Panel (C) 展示的物理 SM/CU 编号")
     ap.add_argument("--dpi", type=int, default=220, help="PNG DPI（默认 220）")
@@ -1291,10 +1297,15 @@ def main():
     if a.selftest:
         return selftest()
     if not (a.dump and a.names and (a.out or a.png)):
-        ap.error("需要 dump、--names，以及 -o overview.png 或 --png overview.png")
+        ap.error("需要 dump、--names，以及 -o <out_dir|out.png> 或 --png <auto|out.png>")
     png_out = a.png
     trace_out = a.out
-    if trace_out and trace_out.lower().endswith(".png"):
+    if trace_out and (
+        trace_out.lower().endswith(".png")
+        or trace_out.strip().lower() == "auto"
+        or os.path.isdir(trace_out)
+        or trace_out.endswith(("/", "\\"))
+    ):
         png_out = trace_out
         trace_out = None
     allow_gz = bool(a.write_gz or os.environ.get("WEAVEPROF_ALLOW_GZ") == "1")
@@ -1303,12 +1314,12 @@ def main():
             if not allow_gz:
                 raise SystemExit(
                     f"WeaveProfiler 默认仅交付 PNG，禁止生成 {trace_out}；"
-                    "请改为 `-o overview.png` 或 `--png overview.png`（若确需调试用 gzip，请显式加 --write-gz）。"
+                    "请改为 `-o <out_dir|timeline.png>` 或 `--png auto`（若确需调试用 gzip，请显式加 --write-gz）。"
                 )
         elif not allow_gz and not png_out:
             raise SystemExit(
                 f"WeaveProfiler 默认仅交付 PNG，不再自动改写为 {trace_out}.gz；"
-                "请改为 `-o overview.png` 或 `--png overview.png`（若确需调试用 JSON/gzip，请显式加 --write-gz）。"
+                "请改为 `-o <out_dir|timeline.png>` 或 `--png auto`（若确需调试用 JSON/gzip，请显式加 --write-gz）。"
             )
     names = json.load(open(a.names, encoding="utf-8"))
     cta_cu_map = None
@@ -1351,6 +1362,7 @@ def main():
         rendered = render_swhw_overview_png(
             tr, png_out, title=a.title, focus_sm=a.sm, dpi=a.dpi,
             require_hw_curves=not a.allow_no_hw,
+            model=a.model, op=a.op, bs=a.bs, seql=a.seql, kv=a.kv, shape=a.shape,
         )
         print("写出 PNG", rendered)
     if trace_out:

@@ -848,15 +848,15 @@ def verify_session_completion(
             removed = _purge_forbidden_gz(bad_gz)
             blockers.append(
                 f"FORBIDDEN_GZ_ARTIFACT: PNG-only delivery policy forbids `.perfetto*.gz` / `.trace.json.gz` "
-                f"files (removed {removed[:4]}); deliver `overview.png` instead."
+                f"files (removed {removed[:4]}); deliver a timeline PNG (`<model>_<op>_<shape>_<YYYYMMDD_HHMMSS>.png`) instead."
             )
         if matched is not None:
             has_png, _png_path = _seal_has_valid_png(matched)
             if not has_png:
                 blockers.append(
                     "MISSING_OVERVIEW_PNG: PNG-only Stop gate requires a verified, non-empty `.png` deliverable "
-                    "(e.g. `overview.png`) bound to the PASS seal; re-run profiling with `render_overview_png=True` "
-                    "or `out='overview.png'` before stopping."
+                    "(`<model>_<op>_<shape>_<YYYYMMDD_HHMMSS>.png`) bound to the PASS seal; re-run profiling with "
+                    "`render_overview_png=True` before stopping."
                 )
     return {
         "ok": not blockers,

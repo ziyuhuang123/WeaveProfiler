@@ -125,9 +125,10 @@ TOOL_DEFS: List[Dict[str, Any]] = [
         "name": "weaveprof_megakernel_audit",
         "description": ("Fast (~3-12s) isolated-copy megakernel profiler (with cached baseline builds) + 4-gate verifier "
                         "for single- or multi-file CUDA C++ / CuTeDSL / Triton megakernels (FlashAttention, FlashMLA, "
-                        "FlashKDA, GDN, MoE). Never mutates the real workspace. Auto-renders a 4-panel SW+HW "
-                        "overview.png locally (no .perfetto.json.gz needed by default) alongside a compact <2 KB "
-                        "causal JSON report and an HMAC seal.json registered in the session (unlocks edits / Stop gate)."),
+                        "FlashKDA, GDN, MoE). Never mutates the real workspace. Auto-renders a 4-panel SW+HW timeline "
+                        "PNG (`<model>_<op>_<shape>_<YYYYMMDD_HHMMSS>.png`, no .perfetto.json.gz needed by default) "
+                        "alongside a compact <2 KB causal JSON report and an HMAC seal.json registered in the session "
+                        "(unlocks edits / Stop gate)."),
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -142,11 +143,17 @@ TOOL_DEFS: List[Dict[str, Any]] = [
                 "nsys_freq_hz": {"type": "integer", "minimum": 1000, "maximum": 500000, "description": "nsys --gpu-metrics-frequency in Hz (default: 200000 = 200 kHz high-frequency sampling)."},
                 "nsys_gpu_device": _S,
                 "nsys_capture_range": _S,
-                "render_overview_png": {"type": "boolean", "description": "Auto-render 4-panel SW+HW overview.png locally (default: true)."},
+                "render_overview_png": {"type": "boolean", "description": "Auto-render 4-panel SW+HW timeline PNG locally (default: true)."},
                 "write_perfetto_gz": {"type": "boolean", "description": "Opt-in: also write trace.perfetto.json.gz (default: false)."},
                 "overview_title": _S,
                 "overview_subtitle": _S,
                 "overview_sm": {"type": "integer", "minimum": 0},
+                "model": {**_S, "description": "Model name token for output PNG filename."},
+                "op": {**_S, "description": "Operator name token (e.g. gemm, attn, moe) for output PNG filename."},
+                "bs": {"type": "integer", "minimum": 1, "description": "Batch size for output PNG filename."},
+                "seql": {"type": "integer", "minimum": 1, "description": "Sequence length for output PNG filename."},
+                "kv": {"type": "integer", "minimum": 1, "description": "KV length for output PNG filename."},
+                "shape": {**_S, "description": "Explicit shape token for output PNG filename."},
                 "card": _S,
                 "arch": _S,
                 "total_sms": {"type": "integer", "minimum": 1},
@@ -177,6 +184,12 @@ TOOL_DEFS: List[Dict[str, Any]] = [
                 "max_rounds": {"type": "integer", "minimum": 1, "maximum": 10},
                 "out": _S,
                 "run_dir": _S,
+                "workload_model": _S,
+                "op": _S,
+                "bs": {"type": "integer", "minimum": 1},
+                "seql": {"type": "integer", "minimum": 1},
+                "kv": {"type": "integer", "minimum": 1},
+                "shape": _S,
                 "enforce_trace_processor": {"type": "boolean"},
                 "prev_causal_report": {"type": "object"},
                 "prev_causal_report_path": _S,
@@ -413,7 +426,7 @@ class WeaveProfServer:
         if sess_pre.get("png_only", True) and args.get("write_perfetto_gz"):
             raise ValueError(
                 "`write_perfetto_gz=True` is blocked by the session PNG-only policy; "
-                "deliver `overview.png` instead (or re-install with `--allow-gz`)."
+                "deliver the timeline PNG instead (or re-install with `--allow-gz`)."
             )
         args.setdefault("workspace", str(self.workspace))
         sess = self._session() or {}
@@ -479,10 +492,10 @@ class WeaveProfServer:
         if sess.get("png_only", True) and args.get("write_perfetto_gz"):
             raise ValueError(
                 "`write_perfetto_gz=True` is blocked by the session PNG-only policy; "
-                "deliver `overview.png` instead (or re-install with `--allow-gz`)."
+                "deliver the timeline PNG instead (or re-install with `--allow-gz`)."
             )
-        if not args.get("out"):
-            args["out"] = str(self._runs_dir() / "overview.png")
+        if not args.get("out") and not args.get("run_dir"):
+            args["run_dir"] = str(self._runs_dir())
         ctx = supervisor_env(self.session_dir) if (self.session_dir / KEY_FILE).is_file() else contextlib.nullcontext()
         with ctx, _chdir(self.workspace):
             res = _handle_profile(args)

@@ -85,9 +85,12 @@ class _Session(ContextDecorator):
     def __init__(self, source, limit, out, probe, feedback, model, max_rounds, card,
                  verify_only=False, verify_json=None, preview_png=None, *,
                  policy=None, gpu_id="auto", bench_cmd=None, llm_refine_first=False,
-                 llm_caller=None, api_key=None, base_url=None):
+                 llm_caller=None, api_key=None, base_url=None,
+                 workload_model=None, op=None, bs=None, seql=None, kv=None, shape=None, dims=None):
+        from .viz import build_timeline_png_name
+
         self.source = Path(source).resolve(strict=True)
-        self.limit, self.out = float(limit), Path(out).resolve()
+        self.limit = float(limit)
         self.policy = policy if isinstance(policy, HarnessPolicy) else HarnessPolicy()
         self.guard = PolicyGuard(self.policy)
         self.gpu_id = gpu_id
@@ -96,19 +99,27 @@ class _Session(ContextDecorator):
         self.llm_caller = llm_caller
         self.api_key = api_key
         self.base_url = base_url
-        self.feedback_path = Path(feedback or (self.out.parent / "feedback.json")).resolve()
-        self.verify_path = Path(verify_json or (self.out.parent / "verify.json")).resolve()
-        self.preview_path = (
-            self.out if self.out.suffix.lower() == ".png"
-            else (Path(preview_png).resolve() if preview_png else self.out.with_suffix(".png"))
+
+        raw_out = "" if out is None else str(out).strip()
+        auto_name = (
+            not raw_out
+            or raw_out.lower() == "auto"
+            or raw_out.endswith(("/", "\\"))
+            or (Path(raw_out).exists() and Path(raw_out).is_dir())
+            or (not Path(raw_out).suffix and not Path(raw_out).exists())
         )
-        self.seal_path = Path(str(self.out) + ".seal.json").resolve()
-        self.ledger_path = (self.out.parent / "episode_ledger.json").resolve()
-        self.probe_path = Path(probe).resolve() if isinstance(probe, (str, Path)) else (self.out.parent / "probe.json").resolve()
-        prod_paths = [self.source, self.probe_path, self.feedback_path, self.verify_path, self.out]
-        if self.preview_path != self.out:
-            prod_paths.append(self.preview_path)
-        safe_products(*prod_paths)
+        out_dir = (
+            Path.cwd().resolve()
+            if (not raw_out or raw_out.lower() == "auto")
+            else (Path(raw_out).resolve() if auto_name else Path(raw_out).resolve().parent)
+        )
+        if auto_name:
+            out_dir.mkdir(parents=True, exist_ok=True)
+
+        self.feedback_path = Path(feedback or (out_dir / "feedback.json")).resolve()
+        self.verify_path = Path(verify_json or (out_dir / "verify.json")).resolve()
+        self.ledger_path = (out_dir / "episode_ledger.json").resolve()
+        self.probe_path = Path(probe).resolve() if isinstance(probe, (str, Path)) else (out_dir / "probe.json").resolve()
         if max_rounds < 1 or not math.isfinite(self.limit) or self.limit < 0:
             raise ValueError("max_rounds must be positive and limit must be finite and nonnegative")
         self.model, self.max_rounds, self.card = model, max_rounds, card
@@ -122,6 +133,24 @@ class _Session(ContextDecorator):
         else:
             self.spec = identify(self.source, out=self.probe_path, card=card, model=model,
                                  llm_caller=self.llm_caller, api_key=self.api_key, base_url=self.base_url)
+
+        if auto_name:
+            fname = build_timeline_png_name(
+                model=workload_model, op=op, bs=bs, seql=seql, kv=kv,
+                shape=shape, dims=dims, source=self.source, spec=self.spec,
+            )
+            self.out = (out_dir / fname).resolve()
+        else:
+            self.out = Path(raw_out).resolve()
+        self.preview_path = (
+            self.out if self.out.suffix.lower() == ".png"
+            else (Path(preview_png).resolve() if preview_png else self.out.with_suffix(".png"))
+        )
+        self.seal_path = Path(str(self.out) + ".seal.json").resolve()
+        prod_paths = [self.source, self.probe_path, self.feedback_path, self.verify_path, self.out]
+        if self.preview_path != self.out:
+            prod_paths.append(self.preview_path)
+        safe_products(*prod_paths)
         self.source_text = self.source.read_bytes().decode("utf-8")
         self.prepared = None
         self.result = None
@@ -354,23 +383,30 @@ class _Session(ContextDecorator):
         return False
 
 
-def profile(source, *, limit=0.10, out="overview.png", probe=None, feedback=None,
+def profile(source, *, limit=0.10, out=None, probe=None, feedback=None,
             verify_json=None, preview_png=None, model="auto", max_rounds=3, card="auto",
             bench=None, policy=None, gpu_id="auto", llm_refine_first=False, llm_caller=None,
-            api_key=None, base_url=None):
+            api_key=None, base_url=None, workload_model=None, op=None, bs=None, seql=None,
+            kv=None, shape=None, dims=None):
     session = _Session(source, limit, out, probe, feedback, model, max_rounds, card,
                        verify_only=False, verify_json=verify_json, preview_png=preview_png,
                        policy=policy, gpu_id=gpu_id, bench_cmd=bench,
                        llm_refine_first=llm_refine_first, llm_caller=llm_caller,
-                       api_key=api_key, base_url=base_url)
+                       api_key=api_key, base_url=base_url,
+                       workload_model=workload_model, op=op, bs=bs, seql=seql,
+                       kv=kv, shape=shape, dims=dims)
     if bench is None:
         return session
-    return session.execute(lambda prepared: run_benchmark(
+    res = session.execute(lambda prepared: run_benchmark(
         session.workspace, prepared, bench, session.spec, timeout_s=session.policy.command_timeout_s))
+    if isinstance(res, dict):
+        res.setdefault("out_path", str(session.out))
+    return res
 
 
 def verify(probe, *, source=None, limit=0.10, feedback=None, verify_json=None,
-           preview_png=None, out="overview.png", bench, policy=None, gpu_id="auto"):
+           preview_png=None, out=None, bench, policy=None, gpu_id="auto",
+           workload_model=None, op=None, bs=None, seql=None, kv=None, shape=None, dims=None):
     doc = read_json(probe) if isinstance(probe, (str, Path)) else probe
     if not source:
         source = doc.get("source_path") or doc.get("source_file")
@@ -380,9 +416,14 @@ def verify(probe, *, source=None, limit=0.10, feedback=None, verify_json=None,
             source = Path(probe).resolve().parent / source
     session = _Session(source, limit, out, probe, feedback, None, 1, doc.get("card", "auto"),
                        verify_only=True, verify_json=verify_json, preview_png=preview_png,
-                       policy=policy, gpu_id=gpu_id, bench_cmd=bench)
-    return session.execute(lambda prepared: run_benchmark(
+                       policy=policy, gpu_id=gpu_id, bench_cmd=bench,
+                       workload_model=workload_model, op=op, bs=bs, seql=seql,
+                       kv=kv, shape=shape, dims=dims)
+    res = session.execute(lambda prepared: run_benchmark(
         session.workspace, prepared, bench, session.spec, timeout_s=session.policy.command_timeout_s))
+    if isinstance(res, dict):
+        res.setdefault("out_path", str(session.out))
+    return res
 
 
 validate = verify
@@ -539,7 +580,7 @@ def profile_for_agent(
     *,
     bench,
     limit=0.10,
-    out="overview.png",
+    out=None,
     run_dir=None,
     probe=None,
     feedback=None,
@@ -555,10 +596,19 @@ def profile_for_agent(
     api_key=None,
     base_url=None,
     arch=None,
+    workload_model=None,
+    op=None,
+    bs=None,
+    seql=None,
+    kv=None,
+    shape=None,
+    dims=None,
 ):
     """Run closed-loop profiling and return a compact, seal-verified report for an agent."""
-    if run_dir and (not out or str(out) == "overview.png"):
-        out = str(Path(run_dir) / "overview.png")
+    if run_dir and (not out or str(out).strip().lower() == "auto"):
+        run_path = Path(run_dir).resolve()
+        run_path.mkdir(parents=True, exist_ok=True)
+        out = str(run_path)
     try:
         res = profile(
             source,
@@ -578,9 +628,20 @@ def profile_for_agent(
             llm_caller=llm_caller,
             api_key=api_key,
             base_url=base_url,
+            workload_model=workload_model,
+            op=op,
+            bs=bs,
+            seql=seql,
+            kv=kv,
+            shape=shape,
+            dims=dims,
         )
         report = build_agent_report(res, arch=arch)
-        report["trace_path"] = str(Path(out).resolve()) if Path(out).is_file() else report.get("trace_path")
+        actual_out = (res.get("out_path") if isinstance(res, dict) else None) or out
+        if actual_out and Path(actual_out).is_file():
+            report["trace_path"] = str(Path(actual_out).resolve())
+        elif report.get("preview_png") and Path(report["preview_png"]).is_file():
+            report["trace_path"] = str(Path(report["preview_png"]).resolve())
         return report
     except VerificationError as exc:
         report = build_agent_report(exc.feedback, arch=arch)

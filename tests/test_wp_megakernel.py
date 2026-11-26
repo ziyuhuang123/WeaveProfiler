@@ -660,12 +660,15 @@ class MegakernelAuditTest(_TmpCase):
         self.assertTrue(sw_pids and all(p >= 100 for p in sw_pids), sw_pids)
         try:
             import matplotlib  # noqa: F401
-            png = out_png / "overview.png"
-            self.assertTrue(png.is_file(), rep_png)
+            pngs = sorted(out_png.glob("*.png"))
+            self.assertEqual(len(pngs), 1, (pngs, rep_png))
+            png = pngs[0]
+            self.assertRegex(png.name, r"^[a-z0-9._-]+_[a-z0-9_-]+_[a-z0-9_-]+_\d{8}_\d{6}\.png$")
             raw_png = png.read_bytes()
             self.assertTrue(raw_png.startswith(b"\x89PNG\r\n\x1a\n"))
             self.assertGreater(len(raw_png), 20_000)
-            self.assertIn("overview.png", rep_png["artifacts"]["files"])
+            self.assertIn(png.name, rep_png["artifacts"]["files"])
+            self.assertEqual(rep_png["artifacts"].get("timeline_png"), png.name)
         except ImportError:
             pass
         # Round-to-round diff against the sealed causal report.
@@ -1740,7 +1743,9 @@ class NsysCaptureFailureAuditTest(_TmpCase):
         )
         self.assertFalse(any("NSYS_CAPTURE_FAILED" in b for b in fb_a1["structural_blockers"]))
         self.assertFalse(any("NSYS_CAPTURE_FAILED" in b for b in rep_a1["structural_blockers"]))
-        self.assertTrue((out_a1 / "overview.png").is_file())
+        a1_pngs = list(out_a1.glob("*.png"))
+        self.assertEqual(len(a1_pngs), 1, a1_pngs)
+        self.assertRegex(a1_pngs[0].name, r"_\d{8}_\d{6}\.png$")
         self.assertTrue(rep_a1["seal_verified"])
         self.assertNotIn("seal_integrity_only", rep_a1)
         self.assertTrue(mk.verify_seal(out_a1 / "seal.json", require_pass=True)["ok"])
@@ -1758,7 +1763,7 @@ class NsysCaptureFailureAuditTest(_TmpCase):
         )
         self.assertFalse(any("NSYS_CAPTURE_FAILED" in b for b in fb_a2["structural_blockers"]))
         self.assertFalse(any("NSYS_CAPTURE_FAILED" in b for b in rep_a2["structural_blockers"]))
-        self.assertFalse((out_a2 / "overview.png").exists())
+        self.assertEqual(list(out_a2.glob("*.png")), [])
         self.assertTrue(mk.verify_seal(out_a2 / "seal.json", require_pass=True)["ok"])
 
         # Row A3: capture_nsys=True, capture succeeds (valid kernel window, 0 GPU_METRICS rows),
@@ -1796,7 +1801,9 @@ class NsysCaptureFailureAuditTest(_TmpCase):
         )
         self.assertFalse(any("NSYS_CAPTURE_FAILED" in b for b in fb_b1["structural_blockers"]))
         self.assertFalse(any("NSYS_CAPTURE_FAILED" in b for b in rep_b1["structural_blockers"]))
-        self.assertTrue((out_b1 / "overview.png").is_file())
+        b1_pngs = list(out_b1.glob("*.png"))
+        self.assertEqual(len(b1_pngs), 1, b1_pngs)
+        self.assertRegex(b1_pngs[0].name, r"_\d{8}_\d{6}\.png$")
         self.assertTrue(mk.verify_seal(out_b1 / "seal.json", require_pass=True)["ok"])
 
         # Row B2: capture_nsys=False, nsys_sqlite=None, render_overview_png=False -> 4x PASS.
@@ -1894,6 +1901,60 @@ class NsysCaptureFailureAuditTest(_TmpCase):
         self.assertTrue(any(b.startswith("SEAL_VERIFY_FAILED:") for b in rep_e1["structural_blockers"]))
         self.assertFalse(mk.verify_seal(out_e1 / "seal.json", require_pass=True)["ok"])
         self.assertFalse(mk.verify_seal(out_e1 / "seal.json", require_pass=False)["ok"])
+
+
+class TimelinePngNamingTests(unittest.TestCase):
+    """Verify descriptive `<model>_<op>_<shape>_<YYYYMMDD_HHMMSS>.png` naming across entry points."""
+
+    def test_explicit_model_op_bs_seql_and_timestamp(self):
+        from weaveprof.viz import build_timeline_png_name
+
+        name = build_timeline_png_name(
+            model="Qwen3.5-397B",
+            op="attn",
+            bs=5,
+            seql=4096,
+            kv=2048,
+            timestamp="20261126_123000",
+        )
+        self.assertEqual(name, "qwen3.5-397b_attn_bs5_seql4096_kv2048_20261126_123000.png")
+
+    def test_gemm_extracted_from_trace_meta_and_title(self):
+        from weaveprof.viz import build_timeline_png_name
+
+        trace = {
+            "otherData": {
+                "meta": {"model": "DeepSeek-V3", "kernel": "triton_gemm_s5", "M": 4096, "N": 4096, "K": 2048},
+            }
+        }
+        name = build_timeline_png_name(trace, timestamp="20261126_123001")
+        self.assertEqual(name, "deepseek-v3_gemm_m4096_n4096_k2048_20261126_123001.png")
+
+    def test_attention_parsed_from_title_when_meta_sparse(self):
+        from weaveprof.viz import build_timeline_png_name
+
+        name = build_timeline_png_name(
+            title="Qwen3.5-397B FlashAttention-3 B=5, H=16, S=4096, D=128",
+            timestamp="20261126_123002",
+        )
+        self.assertEqual(name, "qwen3.5-397b_attn_bs5_seql4096_h16_d128_20261126_123002.png")
+
+    def test_resolve_path_handles_none_dir_and_explicit_file(self):
+        from weaveprof.viz import resolve_timeline_png_path
+
+        with tempfile.TemporaryDirectory() as td:
+            d = Path(td)
+            p_auto = resolve_timeline_png_path(
+                None, default_dir=d, model="Llama3-70B", op="gemm", shape="m1024_n1024_k512",
+                timestamp="20261126_123003",
+            )
+            self.assertEqual(p_auto, d / "llama3-70b_gemm_m1024_n1024_k512_20261126_123003.png")
+            p_dir = resolve_timeline_png_path(
+                d, model="Llama3-70B", op="attn", bs=2, seql=1024, timestamp="20261126_123004",
+            )
+            self.assertEqual(p_dir, d / "llama3-70b_attn_bs2_seql1024_20261126_123004.png")
+            p_explicit = resolve_timeline_png_path(d / "custom_chart.png", model="X", op="gemm")
+            self.assertEqual(p_explicit, d / "custom_chart.png")
 
 
 if __name__ == "__main__":

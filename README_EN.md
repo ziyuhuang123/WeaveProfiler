@@ -24,14 +24,16 @@ Existing hardware profilers and free-form LLM code edits hit three practical roa
 
 > **Core Idea**: Only **recognizing stage boundaries** requires an LLM to read source code; probe injection, async pairing, and trace checks can all run as **deterministic code**.
 
+![WeaveProfiler Architecture Overview](docs/images/weaveprofiler_overview.png)
+
 ### 2.1 Closed-Loop Auto-Instrumentation & Four Hard Gates
 - **Read-only stage identification + automatic injection**: Inside AI coding agents, **`Skill + MCP + Hook`** work together—the `Skill` defines the profiling workflow, lifecycle `Hooks` (`PreToolUse` / `PostToolUse` / `Stop`) block unsealed source edits and stray probe pollution, and the standalone `MCP` server exposes the profiling tools. The LLM only reads kernel code to emit warp roles and stage line boundaries (`probe.json`), after which deterministic code behind `MCP` injects probes and runs verification in an isolated scratch copy outside the workspace (for Triton kernels, direct **NVIDIA PTX and AMD AMDGCN assembly** async instrumentation is also supported).
-- **Four fail-closed checks**: (1) **Assembly order & spill check** (core instruction order preserved, zero added spill `Δspill ≤ 0 B`, unchanged occupancy); (2) **Numerical output** (matches unmodified baseline); (3) **Trace completeness** (every `begin` paired with `end`, zero drops, 100% physical warp/wave64 coverage); (4) **Bidirectional overhead** (steady-state median runtime within `±10%`; over-budget probes are automatically coarsened and re-verified).
-- **Out-of-workspace tamper protection**: Validation runs in a separate MCP process signing `HMAC-SHA256` seals, paired with lifecycle hooks and optional `bubblewrap` read-only mounts so agents cannot relax thresholds or leave stray edits.
+- **Four fail-closed checks**: (1) **Assembly order & spill check** (core instruction order preserved, zero added spill `Δspill ≤ 0 B`, unchanged occupancy); (2) **Numerical output** (matches unmodified baseline); (3) **Trace completeness** (every `begin` paired with `end`, zero drops, 100% physical warp/wave coverage); (4) **Bidirectional overhead** (steady-state median runtime within `±10%`).
+- **Out-of-workspace tamper protection**: Validation and sealing run outside the workspace, paired with hooks to keep agents from relaxing thresholds or leaving stray probes behind.
 
 ### 2.2 Asynchronous Pipeline Tracing (Single-Warp & Cross-Warp)
-- **Single-warp FIFO counting**: Hardware async memory and matrix engines complete requests in submission order (FIFO). Counting `in++` on issue and closing completed entries on `wait(N)` gives exact in-flight depth `d = in - out` at every cycle, while the time spent blocked inside `wait` is recorded separately as **Exposed Wait** (split into `Load Wait` vs. `MMA Wait`) across both NVIDIA (`cp.async`, `wgmma`, `tcgen05`) and AMD (`vmcnt`, `v_mfma`).
-- **Cross-warp producer–consumer pairing**: In warp-specialized ring buffers (such as Hopper FA3 and FlashMLA) where one producer warp loads a slot and multiple compute warps wait on it, pairing each producer issue on `(CTA, slot)` with the **first consumer warp that clears the wait** gives true transfer duration and in-flight TMA depth—without 1-to-N fan-out double-counting or slow-consumer inflation.
+- **Single-warp async tracking**: Pairs async issue with `wait(N)` boundaries to compute live in-flight depth `d` and isolate true stall time as **Exposed Wait** (split into data vs. matrix waits).
+- **Cross-warp producer–consumer pairing**: In 1-to-N ring pipelines (e.g., FA3, FlashMLA), pairs each issue on `(CTA, slot)` with the first consumer that clears the wait, avoiding fan-out double-counting and slow-consumer inflation.
 
 ### 2.3 Low-Overhead Recording & Unchanged Function Signatures
 - **Per-warp buffer slices + single-register state (`WP_CTX_REG`)**: Each `(CTA, warp/wave)` writes 16-byte records sequentially from `lane 0` with **zero atomics and zero cross-warp sync**. `WP_CTX_REG` packs slot ID and write cursor into **one 32-bit register and `0 B` shared memory** (initialized before `setmaxnreg`), with an optional `16 B` shared-memory fallback (`WP_CTX_SMEM`).
@@ -47,9 +49,9 @@ Raw vendor profiler percentages can severely misrepresent hardware headroom on r
 
 ---
 
-## 3. Reading the Four-Panel Aligned View (`overview.png`)
+## 3. Reading the Four-Panel Aligned View
 
-WeaveProfiler renders one high-resolution PNG readable directly by engineers and multimodal LLMs. Panels (A)–(C) share a locked microsecond (`µs`) axis, and Panel (D) opens automatically when stages are dense:
+WeaveProfiler renders one high-resolution PNG readable directly by engineers and multimodal LLMs, automatically named with model, operator, shape, and timestamp (`<model>_<op>_<shape>_<YYYYMMDD_HHMMSS>.png`, e.g., `qwen3.5-397b_attn_bs5_seql4096_20261126_123000.png`). Panels (A)–(C) share a locked microsecond (`µs`) axis, and Panel (D) opens automatically when stages are dense:
 
 - **(A) Same-Run Hardware Utilization Curves**: Chip-wide compute (Tensor / Matrix Core), HBM read+write bandwidth, separate full-duplex interconnect (`NVLink TX` and `NVLink RX` plotted separately; `xGMI` on AMD), and active SM/CU %. Fails closed if real same-run hardware curves are missing.
 - **(B) All-SM / All-CU Waterfall**: Every physical SM/CU on the vertical axis, showing wave steps, load imbalance, and tail stragglers.
@@ -127,8 +129,8 @@ Captured on a 2-node 16×MI308X cluster (`2×8 GPUs`, full-duplex intra-node xGM
 | --- | --- |
 | **GPUs** | NVIDIA Hopper H20 (`sm_90`/`sm_90a`), Blackwell B300 (`sm_100a`/`sm_103a`), Ampere (`sm_86`), AMD Instinct MI308X (`gfx942`) |
 | **Frontends** | CUDA C++, HIP C++, Triton (NVIDIA PTX Dual-Async & AMD AMDGCN Async), CuTeDSL |
-| **Integration** | AI Coding Agents (`Claude Code`, `Qwen Code`, `OpenAI Codex CLI`, `Antigravity` via `Skill + MCP + Hook`), or CLI / Python SDK |
-| **Prerequisites** | Python 3.10+, `nvcc` + `nsys` (NVIDIA) or `hipcc` + `rocprof-sys` (AMD), `matplotlib` |
+| **Integration** | AI Coding Agents (`Claude Code`, `Qwen Code`, `OpenAI Codex CLI`, `Antigravity` via `Skill + MCP + Hook`), or standalone CLI |
+| **Prerequisites** | Python 3.10+, `nvcc` + `nsys` (NVIDIA) or `hipcc` + `rocprof-sys` (AMD), `numpy`, `matplotlib` |
 
 ### AI Coding Agents (`Skill + MCP + Hook`)
 
@@ -142,20 +144,15 @@ python3 -B WeaveProfiler/run.py install-agent \
   --card h20   # h20 | b300 | mi308x | sm86
 ```
 
-### Standalone CLI & Python SDK
+### Standalone CLI
 
 ```bash
-python3 -B WeaveProfiler/run.py identify kernel.cu -o probe.json   --card h20
-python3 -B WeaveProfiler/run.py profile  kernel.cu -o overview.png --card h20 -- python3 bench.py
+# Omit -o to auto-name <model>_<op>_<shape>_<YYYYMMDD_HHMMSS>.png
+python3 -B WeaveProfiler/run.py identify kernel.cu -o probe.json --card h20
+python3 -B WeaveProfiler/run.py profile  kernel.cu --card h20 \
+  --workload-model qwen3.5-397b --op attn --bs 5 --seql 4096 \
+  -- python3 bench.py
 python3 -B WeaveProfiler/run.py doctor
-```
-
-```python
-import weaveprof as wp
-
-spec = wp.identify("kernel.cu", out="probe.json", card="h20")
-with wp.profile("kernel.cu", out="overview.png", card="h20"):
-    run_kernel()
 ```
 
 ### Guarded Batch Execution & Offline Tests

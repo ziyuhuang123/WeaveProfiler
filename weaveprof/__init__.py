@@ -46,6 +46,7 @@ from .megakernel import (
     extract_nsys_sqlite_fast,
     run_megakernel_audit,
 )
+from .viz import build_timeline_png_name, render_swhw_overview_png, resolve_timeline_png_path
 
 __all__ = [
     "profile",
@@ -90,4 +91,7 @@ __all__ = [
     "PLUGIN_NAME",
     "CAPABILITY_KEY",
     "apply_atrex_plugin",
+    "build_timeline_png_name",
+    "resolve_timeline_png_path",
+    "render_swhw_overview_png",
 ]

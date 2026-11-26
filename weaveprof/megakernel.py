@@ -1635,6 +1635,13 @@ def run_megakernel_audit(
     overview_title: str | None = None,
     overview_subtitle: str | None = None,
     overview_sm: int | None = None,
+    model: str | None = None,
+    op: str | None = None,
+    bs: int | None = None,
+    seql: int | None = None,
+    kv: int | None = None,
+    shape: str | None = None,
+    dims: Mapping[str, Any] | None = None,
     card: str = "auto",
     arch: str | None = None,
     total_sms: int | None = None,
@@ -1949,9 +1956,23 @@ def run_megakernel_audit(
     overview_png_path: Optional[Path] = None
     if render_overview_png:
         try:
-            from .viz import render_swhw_overview_png
+            from .viz import build_timeline_png_name, render_swhw_overview_png
+            png_name = build_timeline_png_name(
+                trace_doc,
+                model=model,
+                op=op,
+                bs=bs,
+                seql=seql,
+                kv=kv,
+                shape=shape,
+                dims=dims,
+                title=overview_title,
+                subtitle=overview_subtitle,
+                source=entry,
+                runtime=rm if isinstance(rm, Mapping) else None,
+            )
             overview_png_path = render_swhw_overview_png(
-                trace_doc, out / "overview.png",
+                trace_doc, out / png_name,
                 title=overview_title, subtitle=overview_subtitle, focus_sm=overview_sm,
             )
         except ImportError:
@@ -1970,7 +1991,7 @@ def run_megakernel_audit(
             if not valid_png:
                 status = "FAIL"
                 hard_fail = True
-                blockers.append("MISSING_OVERVIEW_PNG: render_overview_png=True requires a valid non-empty overview.png")
+                blockers.append("MISSING_OVERVIEW_PNG: render_overview_png=True requires a valid non-empty timeline PNG")
 
     feedback_doc = {
         "schema": MEGAKERNEL_SCHEMA, "status": status, "mode": mode, "megakernel_skew": skew,
@@ -2070,8 +2091,9 @@ def run_megakernel_audit(
         "fidelity_gates": gate_view,
         "artifacts": {
             "out_dir": str(out),
+            **({"timeline_png": overview_png_path.name} if overview_png_path and overview_png_path.is_file() else {}),
             "files": ["feedback.json", "verify.json"]
-            + (["overview.png"] if overview_png_path and overview_png_path.is_file() else [])
+            + ([overview_png_path.name] if overview_png_path and overview_png_path.is_file() else [])
             + (["trace.perfetto.json.gz"] if wrote_gz else []),
         },
     }

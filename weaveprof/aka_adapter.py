@@ -60,8 +60,14 @@ def _handle_profile(req: Dict[str, Any]) -> Dict[str, Any]:
         base_url=req.get("base_url"),
         limit=req_limit,
         max_rounds=int(req.get("max_rounds", 3)),
-        out=req.get("out") or "overview.png",
+        out=req.get("out"),
         run_dir=req.get("run_dir"),
+        workload_model=req.get("workload_model"),
+        op=req.get("op"),
+        bs=req.get("bs"),
+        seql=req.get("seql"),
+        kv=req.get("kv"),
+        shape=req.get("shape"),
         policy=policy,
     )
     if prev_report is not None and isinstance(res, dict) and "round_diff" not in res:

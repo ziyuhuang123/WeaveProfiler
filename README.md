@@ -24,14 +24,16 @@
 
 > **核心思路**：整个剖析流程里，**只有“认出哪几行是哪个阶段”需要大模型读代码**；后面的打点注入、异步配对和真伪检查都可以用确定性的代码自动完成。
 
+![WeaveProfiler 整体架构与三项关键设计](docs/images/weaveprofiler_overview.png)
+
 ### 2.1 闭环自动插桩与四道门禁
 - **只读认阶段 + 自动注入**：接入 AI 编程代理时通过 **`Skill + MCP + Hook`** 协同工作——`Skill` 约定剖析流程，生命周期 `Hook`（`PreToolUse` / `PostToolUse` / `Stop`）在工具调用前后拦截未封签的源码修改与探针残留，独立 `MCP` 服务对外提供剖析工具。大模型仅以只读方式分析源码、输出各 Warp 角色和阶段起止行号（`probe.json`），不碰核函数计算代码；随后由 `MCP` 背后的固定代码在工作区外的隔离副本里自动完成插桩与验证（对 Triton 算子亦支持在 **NVIDIA PTX 与 AMD AMDGCN 汇编层**做异步打点）。
-- **四道硬门禁**：① **汇编顺序与溢出检查**（主干指令顺序不变，零新增寄存器溢出 `Δspill ≤ 0 B`，occupancy 无变化）；② **数值检查**（与原核输出一致）；③ **完整性检查**（起止成对、零丢包、100% 物理 Warp/Wave64 覆盖）；④ **双向开销检查**（稳态中位耗时变化在 `±10%` 以内，变慢超标或异常打乱调度都自动退回粗化重测）。
-- **工作区外防篡改**：门禁校验跑在工作区外的独立 MCP 进程中并签发 `HMAC-SHA256` 封签，配合生命周期 Hook 与可选 `bubblewrap` 只读沙箱，防止智能体改门限或残留脏代码。
+- **四道硬门禁**：① **汇编顺序与溢出检查**（主干指令顺序不变，零新增寄存器溢出 `Δspill ≤ 0 B`，occupancy 无变化）；② **数值检查**（与原核输出一致）；③ **完整性检查**（起止成对、零丢包、100% 物理 Warp/wave 覆盖）；④ **双向开销检查**（稳态中位耗时变化在 `±10%` 以内）。
+- **工作区外防篡改**：校验与封签在工作区外独立完成，配合 Hook 防止智能体修改门限或残留探针代码。
 
 ### 2.2 异步流水线追踪（单 Warp 与跨 Warp）
-- **单 Warp 异步计数**：异步访存和矩阵指令都按提交顺序完成（FIFO）。每次提交记一次 `in++`，每次 `wait(N)` 把已完成的旧请求关掉，相减就是当前还在飞的请求数（在途深度 `d = in - out`）；真正卡在 `wait` 指令上的耗时单独标为 **Exposed Wait**（自动拆分为等数据的 `Load Wait` 与等矩阵核的 `MMA Wait`）。NVIDIA（`cp.async` / `wgmma` / `tcgen05`）和 AMD（`vmcnt` / `v_mfma`）共用这套逻辑。
-- **跨 Warp 生产者–消费者配对**：在 FA3、FlashMLA 这类“1 个生产者 Warp 搬数据、多个计算 Warp 等同一个槽位”的环形流水线中，按 `(CTA, 槽位)` 把每次 TMA 发射和**第一个等到数据的消费者**配成一对，即可算出真实的搬运耗时与在途深度——既不会因 1 对多广播重复计数，也不会把慢消费者自己的计算耗时算进搬运里。
+- **单 Warp 异步追踪**：按异步队列的提交与 `wait(N)` 边界配对，算出实时在途深度 `d`（同时在飞的请求数），并将真正卡在 `wait` 上的时间单独标为 **Exposed Wait**（区分等数据与等矩阵计算）。
+- **跨 Warp 生产者–消费者配对**：在 1 个搬运 Warp 对多个计算 Warp 的环形流水线（如 FA3、FlashMLA）中，按 `(CTA, 槽位)` 将发射与首个完成等待的消费者配对，避免 1 对多重复计数或被慢消费者拉长耗时。
 
 ### 2.3 低开销记录与免改函数签名
 - **每 Warp 独立显存切片 + 单寄存器状态**：每个 `(CTA, Warp/Wave)` 独享一段连续缓冲，只由 `lane 0` 顺序写出 16 字节记录，全程**无原子锁、无跨 Warp 同步**。默认模式 `WP_CTX_REG` 把槽位号与写指针压进 **1 个 32 位寄存器（`0 B` 共享内存）**，在 `setmaxnreg` 核上自动提前到缩减寄存器前初始化；极端零余量场景可选 `16 B` 共享内存回退（`WP_CTX_SMEM`）。
@@ -47,9 +49,9 @@
 
 ---
 
-## 3. 四联软硬对齐图（`overview.png`）读法
+## 3. 四联软硬对齐图读法
 
-WeaveProfiler 默认直出一张高分辨率四联 PNG（工程师和多模态大模型都能直接看，不用开几百 MB 的 Perfetto）。前 3 栏共用同一微秒（`µs`）横轴，事件密集时自动展开第 4 栏放大图：
+WeaveProfiler 默认直出一张高分辨率四联 PNG，输出文件名自动包含模型名、算子名、尺寸与日期时间（`<model>_<op>_<shape>_<YYYYMMDD_HHMMSS>.png`，例如 `qwen3.5-397b_attn_bs5_seql4096_20261126_123000.png`），工程师和多模态大模型都能直接看，不用开几百 MB 的 Perfetto。前 3 栏共用同一微秒（`µs`）横轴，事件密集时自动展开第 4 栏放大图：
 
 - **(A) 同次硬件利用率曲线**：同次运行采集的整卡计算利用率（Tensor / Matrix Core）、HBM 读写总带宽、独立全双工互联（`NVLink TX` 与 `NVLink RX` 分开画；AMD 为 `xGMI`）及活跃 SM/CU 占比；缺真实硬件曲线时直接报错拒画。
 - **(B) 全卡 SM / CU 瀑布图**：纵轴列出全卡所有物理核心（如 H20 78 SMs、B300 148 SMs、MI308X 80 CUs），一眼看清波次切换、负载不均与长尾拖慢。
@@ -127,8 +129,8 @@ WeaveProfiler 输出的 `(在途深度 d, Exposed Wait %)` 直接给出可执行
 | --- | --- |
 | **GPU 架构** | NVIDIA Hopper H20（`sm_90` / `sm_90a`）、Blackwell B300（`sm_100a` / `sm_103a`）、Ampere（`sm_86`）、AMD Instinct MI308X（`gfx942`） |
 | **算子前端** | CUDA C++、HIP C++、Triton（NVIDIA PTX 自动双异步 & AMD AMDGCN 自动异步）、CuTeDSL |
-| **接入方式** | 以 `Skill + MCP + Hook` 嵌入 AI 编程代理（`Claude Code`、`Qwen Code`、`OpenAI Codex CLI`、`Antigravity`），或通过 CLI / Python SDK 调用 |
-| **运行依赖** | Python 3.10+、`nvcc` + `nsys`（NVIDIA）或 `hipcc` + `rocprof-sys`（AMD）、`matplotlib` |
+| **接入方式** | 以 `Skill + MCP + Hook` 嵌入 AI 编程代理（`Claude Code`、`Qwen Code`、`OpenAI Codex CLI`、`Antigravity`），或通过 CLI 独立调用 |
+| **运行依赖** | Python 3.10+、`nvcc` + `nsys`（NVIDIA）或 `hipcc` + `rocprof-sys`（AMD）、`numpy`、`matplotlib` |
 
 ### 接入 AI 编程代理（`Skill + MCP + Hook`）
 
@@ -142,23 +144,17 @@ python3 -B WeaveProfiler/run.py install-agent \
   --card h20   # 可选：h20 | b300 | mi308x | sm86
 ```
 
-### CLI 与 Python SDK 直接调用
+### CLI 直接调用
 
 ```bash
-# 1) CLI 一键只读阶段识别 / 闭环插桩剖析直出四联 PNG
-python3 -B WeaveProfiler/run.py identify kernel.cu -o probe.json   --card h20
-python3 -B WeaveProfiler/run.py profile  kernel.cu -o overview.png --card h20 -- python3 bench.py
+# 1) CLI 只读阶段识别 / 自动插桩剖析（不指定 -o 时自动输出 <model>_<op>_<shape>_<YYYYMMDD_HHMMSS>.png）
+python3 -B WeaveProfiler/run.py identify kernel.cu -o probe.json --card h20
+python3 -B WeaveProfiler/run.py profile  kernel.cu --card h20 \
+  --workload-model qwen3.5-397b --op attn --bs 5 --seql 4096 \
+  -- python3 bench.py
 
 # 2) 环境与编译器自检
 python3 -B WeaveProfiler/run.py doctor
-```
-
-```python
-import weaveprof as wp
-
-spec = wp.identify("kernel.cu", out="probe.json", card="h20")
-with wp.profile("kernel.cu", out="overview.png", card="h20"):
-    run_kernel()
 ```
 
 ### 沙箱批处理与离线单元测试
