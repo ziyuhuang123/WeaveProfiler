@@ -4,7 +4,7 @@
 
 > **See what every SM/CU and warp/wave is doing microsecond by microsecond — an automated intra-kernel GPU profiling framework built for modern asynchronous pipelines and agent-driven Recursive Self-Improvement (RSI).**
 
-**WeaveProfiler** aligns **automated intra-kernel software instrumentation** with **same-run hardware utilization counters** in a timeline image (`overview.png`). It integrates directly inside AI coding agents (`Claude Code`, `Qwen Code`, `OpenAI Codex CLI`, `Antigravity`) via **`Skill + MCP + Hook`**, and also provides a standalone CLI. Across **CUDA C++, HIP C++, Triton, and CuTeDSL**, semantic stage identification is handled by an LLM, while probe injection and output post-processing are executed by deterministic code to maximize reliability and stability.
+**WeaveProfiler** aligns **automated intra-kernel software instrumentation** with **same-run hardware utilization counters** in a timeline image. It integrates directly inside AI coding agents (`Claude Code`, `Qwen Code`, `OpenAI Codex CLI`, `Antigravity`) via **`Skill + MCP + Hook`**, and also provides a standalone CLI. Across **CUDA C++, HIP C++, Triton, and CuTeDSL**, semantic stage identification is handled by an LLM, while probe injection and output post-processing are executed by deterministic code to maximize reliability and stability.
 
 ---
 
@@ -22,7 +22,7 @@ Existing hardware profilers and free-form LLM code edits hit three practical roa
 
 ## 2. Core Idea & Three Key Designs
 
-> **Core Idea**: Only **recognizing stage boundaries** requires an LLM to read source code; probe injection, async pairing, and trace checks can all run as **deterministic rules**. And because hardware async queues retire work in FIFO order, runtime probe state fits in **one 32-bit register** (`0 B` shared memory).
+> **Core Idea**: Only **recognizing stage boundaries** requires an LLM to read source code; probe injection, async pairing, and trace checks can all run as **deterministic code**.
 
 ```text
 Protected Source (Read-Only) ──► Read-Only Stage Identification (LLM) ──► probe.json
