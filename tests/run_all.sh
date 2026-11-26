@@ -329,6 +329,8 @@ run_item "ROUTE tests/test_registry_language.py" "${PY_RUN[@]}" tests/test_regis
 # Scan and deterministic instrumentation.
 run_item "INSTRUMENT tests/test_card_schema.py" "${PY_RUN[@]}" tests/test_card_schema.py
 run_item "PROBE tests/test_probe_pipeline.py" "${PY_RUN[@]}" tests/test_probe_pipeline.py
+run_item "EXPERIMENTS tests/experiments/test_direct_probe_agent.py" \
+  "${PY_RUN[@]}" tests/experiments/test_direct_probe_agent.py
 run_item "CLI tests/test_run_cli.py" "${PY_RUN[@]}" tests/test_run_cli.py
 run_item "GEMM tests/test_gemm_probe_unit.py" "${PY_RUN[@]}" tests/test_gemm_probe_unit.py
 run_item "CAPTURE tests/test_capture_nsys_contract.py" \

@@ -10,6 +10,7 @@ absence of stale snapshot/cache files.
 """
 from __future__ import annotations
 
+import ast
 import importlib.util
 import json
 import re
@@ -23,7 +24,7 @@ PKG = HERE.parent
 TEXT_EXT = {".py", ".md", ".json", ".cu", ".cuh", ".h", ".hpp", ".cpp", ".cc", ".sh", ".txt", ".jsonl"}
 ALLOWED_TOP = {
     "README.md", "README_EN.md", "SKILL.md", "plugin.json", "pyproject.toml", "run.py",
-    "recorders", "weaveprof", "configs", "docs", "examples", "tests",
+    "recorders", "weaveprof", "configs", "docs", "examples", "experiments", "tests",
 }
 REQUIRED_TOP = ALLOWED_TOP - {"README.md", "README_EN.md", "plugin.json"}
 REQUIRED_FILES = [
@@ -266,6 +267,40 @@ def _check_run_interface(fails: list[str]) -> None:
     print("  CLI and fast-cache contract checked")
 
 
+def _check_experiments_isolation(fails: list[str]) -> None:
+    """Enforce one-way dependency: core code may never import or load from `experiments/`."""
+    core_globs = ("weaveprof/**/*.py", "run.py", "recorders/**/*.py", "recorders/**/*.cuh", "recorders/**/*.h")
+    exp_path_rx = re.compile(r"(?<![A-Za-z0-9_])experiments/[A-Za-z0-9_./-]+")
+    seen: set[Path] = set()
+    bad: list[str] = []
+    for pat in core_globs:
+        for path in sorted(PKG.glob(pat)):
+            if not path.is_file() or "__pycache__" in path.parts or path in seen:
+                continue
+            seen.add(path)
+            rel = path.relative_to(PKG).as_posix()
+            text = path.read_text(encoding="utf-8", errors="replace")
+            if path.suffix == ".py":
+                tree = ast.parse(text, filename=rel)
+                for node in ast.walk(tree):
+                    if isinstance(node, ast.Import):
+                        for alias in node.names:
+                            if alias.name == "experiments" or alias.name.startswith("experiments."):
+                                bad.append(f"{rel}:{node.lineno} imports {alias.name}")
+                    elif isinstance(node, ast.ImportFrom):
+                        mod = node.module or ""
+                        if mod == "experiments" or mod.startswith("experiments."):
+                            bad.append(f"{rel}:{node.lineno} imports from {mod}")
+            for lineno, line in enumerate(text.splitlines(), 1):
+                if line.lstrip().startswith("#"):
+                    continue
+                if exp_path_rx.search(line):
+                    bad.append(f"{rel}:{lineno} references experiments/ path")
+    if bad:
+        fails.append("core code must not depend on experiments/: {}".format(bad[:8]))
+    print("  experiments isolation: {} core files checked".format(len(seen)))
+
+
 def _check_source_hygiene(fails: list[str]) -> None:
     junk, crlf, duplicate_paths, old_names = [], [], [], []
     duplicate_patterns = tuple("/".join((name, name)) for name in
@@ -326,6 +361,7 @@ def main() -> int:
     _check_cross_file_contract(fails)
     _check_knowledge(fails)
     _check_run_interface(fails)
+    _check_experiments_isolation(fails)
     _check_source_hygiene(fails)
     if fails:
         print("PACKAGE STRUCTURE FAIL")

@@ -37,14 +37,11 @@ from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple
 
 sys.dont_write_bytecode = True
 
-ROOT = Path(__file__).resolve().parents[3]
-SCAN_DIR = Path(__file__).resolve().parent
+ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
-if str(SCAN_DIR) not in sys.path:
-    sys.path.insert(0, str(SCAN_DIR))
 
-from llm_probe_placer import (  # noqa: E402
+from weaveprof.pipeline.scan.llm_probe_placer import (  # noqa: E402
     ABLATION_MODES,
     SUPPORTED_MODELS,
     call_llm,

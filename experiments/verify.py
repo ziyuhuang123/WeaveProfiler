@@ -24,32 +24,20 @@ from typing import Any, Dict, List, Mapping, Optional
 # Enforce no bytecode cache
 sys.dont_write_bytecode = True
 
-ROOT = Path(__file__).resolve().parents[3]
-sys.path.insert(0, str(ROOT))
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 
-import importlib.util
-
-def _load_mod(rel_path: str, mod_name: str):
-    p = ROOT / rel_path
-    spec = importlib.util.spec_from_file_location(mod_name, p)
-    if spec is None or spec.loader is None:
-        raise RuntimeError(f"Cannot load {p}")
-    mod = importlib.util.module_from_spec(spec)
-    sys.modules[mod_name] = mod
-    spec.loader.exec_module(mod)
-    return mod
-
-_clv = _load_mod("weaveprof/pipeline/validate/closed_loop_verifier.py", "wp_closed_loop_verifier")
-evaluate_four_gates = _clv.evaluate_four_gates
-build_feedback_json = _clv.build_feedback_json
-decode_and_check_completeness = _clv.decode_and_check_completeness
-_run_external_eval_cmd = _clv._run_external_eval_cmd
-
-_re = _load_mod("weaveprof/pipeline/instrument/rule_engine.py", "wp_rule_engine")
-run_cpu_parallel_preflight = _re.run_cpu_parallel_preflight
-
-_pl = _load_mod("weaveprof/pipeline/scan/llm_probe_placer.py", "wp_llm_probe_placer")
-detect_language = _pl.detect_language
+from weaveprof.pipeline.instrument import rule_engine as _re  # noqa: E402
+from weaveprof.pipeline.instrument.rule_engine import run_cpu_parallel_preflight  # noqa: E402
+from weaveprof.pipeline.scan.llm_probe_placer import detect_language  # noqa: E402
+from weaveprof.pipeline.validate import closed_loop_verifier as _clv  # noqa: E402
+from weaveprof.pipeline.validate.closed_loop_verifier import (  # noqa: E402
+    _run_external_eval_cmd,
+    build_feedback_json,
+    decode_and_check_completeness,
+    evaluate_four_gates,
+)
 
 NUMERIC_STAGE_MAP: Dict[int, str] = {
     1: "load",

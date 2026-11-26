@@ -86,7 +86,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 # Single path constant for relocating this test when moving the module to `experiments/`
-DPA = ROOT / "weaveprof/pipeline/scan/direct_probe_agent.py"
+DPA = ROOT / "experiments/direct_probe_agent.py"
 
 
 def _load_dpa_module():
