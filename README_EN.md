@@ -20,7 +20,7 @@ Existing hardware profilers and free-form LLM code edits hit three practical roa
 
 ---
 
-## 2. Core Idea & Four Key Designs
+## 2. Core Idea & Three Key Designs
 
 > **Core Idea**: Only **recognizing stage boundaries** requires an LLM to read source code; probe injection, async pairing, and trace checks can all run as **deterministic rules**. And because hardware async queues retire work in FIFO order, runtime probe state fits in **one 32-bit register** (`0 B` shared memory).
 
@@ -49,7 +49,7 @@ Protected Source (Read-Only) ──► Read-Only Stage Identification (LLM) ─�
 - **Per-warp buffer slices + single-register state (`WP_CTX_REG`)**: Each `(CTA, warp/wave)` writes 16-byte records sequentially from `lane 0` with **zero atomics and zero cross-warp sync**. `WP_CTX_REG` packs slot ID and write cursor into **one 32-bit register and `0 B` shared memory** (initialized before `setmaxnreg`), with an optional `16 B` shared-memory fallback (`WP_CTX_SMEM`).
 - **Cycle-counter calibration + out-of-band binding**: Hot loops read fast local cycle counters (`%clock64` / `s_memtime`) anchored by open/close wall clocks, fusing back-to-back stage boundaries into one clock read; multi-header C++ kernels bind buffers via module-scope device symbols without changing any `__global__` / `__device__` function signature.
 
-### 2.4 Silicon-Calibrated Hardware Utilization Curves (Avoiding Static Datasheet Distortion)
+### Implementation Details: Silicon-Calibrated Hardware Utilization Curves (Avoiding Static Datasheet Distortion)
 Raw vendor profiler percentages can severely misrepresent hardware headroom on regulated or derived GPU SKUs. WeaveProfiler calibrates Panel (A) curves against first-principles silicon microbenchmarks (pure-compute + full-memory GEMM):
 - **NVIDIA H20 (`sm_90a`) — `1/4` Die-Width Calibration (`×4.0`)**: `nsys` normalizes `Tensor Active` against the full GH100 die's Tensor pipe width, capping a 100%-saturated H20 kernel at `25%` raw; WeaveProfiler automatically detects H20 and restores `×4.0`.
 - **AMD Instinct MI308X (`gfx942`, 80 CUs) — Live Dynamic-Clock Cycle Duty (Eliminating the `398.7T` Denominator Trap)**:
