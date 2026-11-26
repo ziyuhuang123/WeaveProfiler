@@ -24,18 +24,6 @@ Existing hardware profilers and free-form LLM code edits hit three practical roa
 
 > **Core Idea**: Only **recognizing stage boundaries** requires an LLM to read source code; probe injection, async pairing, and trace checks can all run as **deterministic code**.
 
-```text
-Protected Source (Read-Only) ──► Read-Only Stage Identification (LLM) ──► probe.json
-                                                                              │
-                                                                              ▼
-             Out-of-Workspace Auto-Injection (C++/CuTe Source · NVIDIA PTX / AMD AMDGCN Async Pass)
-                                                                              │
-                                                                              ▼
-                       Same-Run HW Sampling (200 kHz nsys / rocprof-sys) + Four Hard Gates
-                         ├── Any gate fails ──► return offending probes in feedback.json -> coarsen & retry
-                         └── All gates pass ──► render aligned 4-panel overview.png + HMAC-SHA256 seal
-```
-
 ### 2.1 Closed-Loop Auto-Instrumentation & Four Hard Gates
 - **Read-only stage identification + automatic injection**: The LLM only reads kernel code and outputs warp roles plus line boundaries (`probe.json`). Deterministic tooling injects probes into a scratch copy—and for Triton kernels, instruments **NVIDIA PTX and AMD AMDGCN assembly directly** without touching Python loops.
 - **Four fail-closed checks**: (1) **Assembly & resources** (core instruction order preserved, zero added spill `Δspill ≤ 0 B`, zero added shared memory `Δsmem ≤ 0 B`); (2) **Numerical output** (matches unmodified baseline); (3) **Trace completeness** (every `begin` paired with `end`, zero drops, 100% physical warp/wave64 coverage); (4) **Bidirectional overhead** (steady-state median runtime within `±10%`; over-budget probes are automatically coarsened and re-verified).
